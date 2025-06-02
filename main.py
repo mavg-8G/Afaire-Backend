@@ -98,6 +98,11 @@ class UserCreate(BaseModel):
     username: str
     password: str
 
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
 class CategoryCreate(BaseModel):
     name: str
     icon_name: str
@@ -154,18 +159,6 @@ def record_history(db: Session, user_id: int, action: str):
     db.commit()
 
 # Routes
-@app.post("/users")
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = User(
-        name=user.name,
-        username=user.username,
-        hashed_password=get_password_hash(user.password)
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
 @app.get("/users")
 def get_users(db: Session = Depends(get_db)):
     return db.query(User).all()
@@ -177,15 +170,44 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
+@app.post("/users")
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    # Verificar que el username no esté en uso
+    existing_user = db.query(User).filter(User.username == user.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    db_user = User(
+        name=user.name,
+        username=user.username,
+        hashed_password=get_password_hash(user.password)
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
 @app.put("/users/{user_id}")
-def update_user(user_id: int, name: str = Form(...), username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def update_user(user_id: int, name: Optional[str] = Form(None), username: Optional[str] = Form(None), password: Optional[str] = Form(None), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    user.name = name
-    user.username = username
-    user.hashed_password = get_password_hash(password)
+    
+    # Validar que el username no esté en uso por otro usuario
+    if username is not None:
+        existing_user = db.query(User).filter(User.username == username, User.id != user_id).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username already exists")
+    
+    if name is not None:
+        user.name = name
+    if username is not None:
+        user.username = username
+    if password is not None:
+        user.hashed_password = get_password_hash(password)
+    
     db.commit()
+    db.refresh(user)
     return user
 
 @app.delete("/users/{user_id}")
@@ -237,8 +259,24 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"detail": "Category deleted"}
 
+@app.get("/activities")
+def get_activities(db: Session = Depends(get_db)):
+    return db.query(Activity).all()
+
+
 @app.post("/activities")
 def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
+    # Verificar que la categoría existe
+    category = db.query(Category).filter(Category.id == activity.category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    # Verificar que todos los usuarios responsables existen
+    if activity.responsible_ids:
+        existing_users = db.query(User).filter(User.id.in_(activity.responsible_ids)).all()
+        if len(existing_users) != len(activity.responsible_ids):
+            raise HTTPException(status_code=404, detail="One or more users not found")
+    
     db_activity = Activity(
         title=activity.title,
         start_date=activity.start_date,
@@ -251,7 +289,10 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         notes=activity.notes,
         mode=activity.mode
     )
-    db_activity.responsibles = db.query(User).filter(User.id.in_(activity.responsible_ids)).all()
+    
+    if activity.responsible_ids:
+        db_activity.responsibles = existing_users
+    
     db.add(db_activity)
     db.commit()
     db.refresh(db_activity)
@@ -277,13 +318,25 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
         raise HTTPException(status_code=404, detail="Activity not found")
 
     update_data = activity_update.dict(exclude_unset=True)
+    
+    # Validar category_id si se está actualizando
+    if "category_id" in update_data:
+        category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
 
     if "days_of_week" in update_data and update_data["days_of_week"] is not None:
         update_data["days_of_week"] = ",".join(update_data["days_of_week"])
 
     for key, value in update_data.items():
         if key == "responsible_ids":
-            activity.responsibles = db.query(User).filter(User.id.in_(value)).all()
+            if value:  # Solo validar si hay IDs
+                existing_users = db.query(User).filter(User.id.in_(value)).all()
+                if len(existing_users) != len(value):
+                    raise HTTPException(status_code=404, detail="One or more users not found")
+                activity.responsibles = existing_users
+            else:
+                activity.responsibles = []
         else:
             setattr(activity, key, value)
 
@@ -299,6 +352,34 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
     db.delete(activity)
     db.commit()
     return {"detail": "Activity deleted successfully"}
+
+@app.get("/activities/{activity_id}/todos")
+def get_activity_todos(activity_id: int, db: Session = Depends(get_db)):
+    activity = db.query(Activity).filter(Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    return activity.todos
+
+@app.post("/activities/{activity_id}/todos")
+def add_todo_to_activity(activity_id: int, todo: TodoCreate, db: Session = Depends(get_db)):
+    activity = db.query(Activity).filter(Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    db_todo = Todo(text=todo.text, activity_id=activity_id)
+    db.add(db_todo)
+    db.commit()
+    db.refresh(db_todo)
+    return db_todo
+
+@app.delete("/todos/{todo_id}")
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    db.delete(todo)
+    db.commit()
+    return {"detail": "Todo deleted successfully"}
 
 @app.get("/history")
 def get_history(db: Session = Depends(get_db)):
