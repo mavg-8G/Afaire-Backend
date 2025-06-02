@@ -1,5 +1,5 @@
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Depends, Form
+from fastapi import FastAPI, HTTPException, Depends, Form, Body, Security
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date, time
@@ -7,6 +7,8 @@ from enum import Enum
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session
 from passlib.context import CryptContext
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from VerificarToken import create_access_token, verify_token
 
 app = FastAPI()
 
@@ -23,6 +25,8 @@ db_engine = create_engine("sqlite:///./todo_app.db", connect_args={"check_same_t
 SessionLocal = sessionmaker(bind=db_engine, autoflush=False, autocommit=False)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
 
 # Enums
 class CategoryMode(str, Enum):
@@ -50,6 +54,7 @@ class User(Base):
     name = Column(String, nullable=False)
     username = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
 class Category(Base):
     __tablename__ = 'categories'
@@ -79,6 +84,7 @@ class Todo(Base):
     __tablename__ = 'todos'
     id = Column(Integer, primary_key=True)
     text = Column(Text, nullable=False)
+    complete = Column(Boolean, default=False, nullable=False)
     activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
     activity = relationship("Activity", back_populates="todos")
 
@@ -93,15 +99,21 @@ class History(Base):
 Base.metadata.create_all(bind=db_engine)
 
 # Schemas
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
 class UserCreate(BaseModel):
     name: str
     username: str
     password: str
+    is_admin: bool = False 
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    is_admin: Optional[bool] = None
 
 class CategoryCreate(BaseModel):
     name: str
@@ -115,6 +127,11 @@ class CategoryUpdate(BaseModel):
 
 class TodoCreate(BaseModel):
     text: str
+    complete: bool = False
+
+class TodoUpdate(BaseModel):
+    text: Optional[str] = None
+    complete: Optional[bool] = None
 
 class ActivityCreate(BaseModel):
     title: str
@@ -142,6 +159,10 @@ class ActivityUpdate(BaseModel):
     notes: Optional[str]
     mode: Optional[CategoryMode]
     responsible_ids: Optional[List[int]] = []
+
+class HistoryCreate(BaseModel):
+    action: str
+    user_id: int
 # Dependency
 def get_db():
     db = SessionLocal()
@@ -159,6 +180,14 @@ def record_history(db: Session, user_id: int, action: str):
     db.commit()
 
 # Routes
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not pwd_context.verify(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": str(user.id)})
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.get("/users")
 def get_users(db: Session = Depends(get_db)):
     return db.query(User).all()
@@ -172,7 +201,6 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
 
 @app.post("/users")
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    # Verificar que el username no esté en uso
     existing_user = db.query(User).filter(User.username == user.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -180,35 +208,54 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     db_user = User(
         name=user.name,
         username=user.username,
-        hashed_password=get_password_hash(user.password)
+        hashed_password=get_password_hash(user.password),
+        is_admin=user.is_admin
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     return db_user
 
+
 @app.put("/users/{user_id}")
-def update_user(user_id: int, name: Optional[str] = Form(None), username: Optional[str] = Form(None), password: Optional[str] = Form(None), db: Session = Depends(get_db)):
+def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Validar que el username no esté en uso por otro usuario
-    if username is not None:
-        existing_user = db.query(User).filter(User.username == username, User.id != user_id).first()
+    if user_update.username is not None:
+        existing_user = db.query(User).filter(User.username == user_update.username, User.id != user_id).first()
         if existing_user:
             raise HTTPException(status_code=400, detail="Username already exists")
     
-    if name is not None:
-        user.name = name
-    if username is not None:
-        user.username = username
-    if password is not None:
-        user.hashed_password = get_password_hash(password)
+    if user_update.name is not None:
+        user.name = user_update.name
+    if user_update.username is not None:
+        user.username = user_update.username
+    if user_update.password is not None:
+        user.hashed_password = get_password_hash(user_update.password)
+    if user_update.is_admin is not None:
+        user.is_admin = user_update.is_admin  # Update is_admin
     
     db.commit()
     db.refresh(user)
     return user
+
+@app.post("/users/{user_id}/change-password")
+def change_password(
+    user_id: int,
+    req: ChangePasswordRequest,
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not pwd_context.verify(req.old_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Old password is incorrect")
+    user.hashed_password = get_password_hash(req.new_password)
+    db.commit()
+    return {"detail": "Password updated successfully"}
+
 
 @app.delete("/users/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db)):
@@ -365,12 +412,30 @@ def add_todo_to_activity(activity_id: int, todo: TodoCreate, db: Session = Depen
     activity = db.query(Activity).filter(Activity.id == activity_id).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-    
-    db_todo = Todo(text=todo.text, activity_id=activity_id)
+    db_todo = Todo(text=todo.text, complete=todo.complete, activity_id=activity_id)
     db.add(db_todo)
     db.commit()
     db.refresh(db_todo)
     return db_todo
+
+@app.get("/todos/{todo_id}")
+def get_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return todo
+
+@app.put("/todos/{todo_id}")
+def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get_db)):
+    todo = db.query(Todo).filter(Todo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    update_data = todo_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(todo, key, value)
+    db.commit()
+    db.refresh(todo)
+    return todo
 
 @app.delete("/todos/{todo_id}")
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
@@ -384,6 +449,18 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db)):
 @app.get("/history")
 def get_history(db: Session = Depends(get_db)):
     return db.query(History).order_by(History.timestamp.desc()).all()
+
+@app.post("/history")
+def create_history(history: HistoryCreate, db: Session = Depends(get_db)):
+    # Verifica que el usuario existe
+    user = db.query(User).filter(User.id == history.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db_history = History(action=history.action, user_id=history.user_id)
+    db.add(db_history)
+    db.commit()
+    db.refresh(db_history)
+    return db_history
 
 if __name__ == "__main__":
     import uvicorn
