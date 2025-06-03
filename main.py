@@ -347,11 +347,13 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Category not found")
     
     # Verificar que todos los usuarios responsables existen
+    existing_users = []
     if activity.responsible_ids:
         existing_users = db.query(User).filter(User.id.in_(activity.responsible_ids)).all()
         if len(existing_users) != len(activity.responsible_ids):
             raise HTTPException(status_code=404, detail="One or more users not found")
     
+    # Crear la actividad
     db_activity = Activity(
         title=activity.title,
         start_date=activity.start_date,
@@ -365,18 +367,31 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         mode=activity.mode
     )
     
-    if activity.responsible_ids:
+    # Asignar usuarios responsables
+    if existing_users:
         db_activity.responsibles = existing_users
     
+    # Guardar la actividad primero
     db.add(db_activity)
     db.commit()
-    db.refresh(db_activity)
-
-    for todo in activity.todos:
-        db_todo = Todo(text=todo.text, activity_id=db_activity.id)
+    db.refresh(db_activity)  # Importante: obtener el ID generado
+    
+    # Agregar TODOs después de que la actividad tenga un ID
+    for todo_data in activity.todos:
+        db_todo = Todo(
+            text=todo_data.text, 
+            complete=todo_data.complete,
+            activity_id=db_activity.id
+        )
         db.add(db_todo)
-
+    
+    # Commit final para los TODOs
     db.commit()
+    
+    # Refresh final para obtener la actividad con todas sus relaciones
+    db.refresh(db_activity)
+    
+    print(f"Activity created successfully with ID: {db_activity.id}")  # Debug log
     return db_activity
 
 @app.get("/activities/{activity_id}")
