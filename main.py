@@ -1,6 +1,6 @@
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Depends, Form, Body, Security
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Depends, Response
+from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, date, time
 from enum import Enum
@@ -80,6 +80,14 @@ class Activity(Base):
     responsibles = relationship("User", secondary=activity_user, backref="activities")
     todos = relationship("Todo", back_populates="activity")
 
+class ActivityOccurrence(Base):
+    __tablename__ = 'activity_occurrences'
+    id = Column(Integer, primary_key=True)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    complete = Column(Boolean, default=False, nullable=False)
+    activity = relationship("Activity", backref="occurrences")
+
 class Todo(Base):
     __tablename__ = 'todos'
     id = Column(Integer, primary_key=True)
@@ -132,6 +140,23 @@ class TodoCreate(BaseModel):
 class TodoUpdate(BaseModel):
     text: Optional[str] = None
     complete: Optional[bool] = None
+
+class ActivityResponse(BaseModel):
+    id: int
+    title: str
+    start_date: datetime
+    time: str
+    category_id: int
+    repeat_mode: RepeatMode
+    end_date: Optional[datetime]
+    days_of_week: Optional[str]
+    day_of_month: Optional[int]
+    notes: Optional[str]
+    mode: CategoryMode
+    responsible_ids: List[int]
+
+    class Config:
+        orm_mode = True
 
 class ActivityCreate(BaseModel):
     title: str
@@ -306,10 +331,27 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"detail": "Category deleted"}
 
-@app.get("/activities")
+@app.get("/activities", response_model=List[ActivityResponse])
 def get_activities(db: Session = Depends(get_db)):
-    return db.query(Activity).all()
-
+    activities = db.query(Activity).all()
+    # Map responsibles to responsible_ids
+    return [
+        ActivityResponse(
+            id=a.id,
+            title=a.title,
+            start_date=a.start_date,
+            time=a.time,
+            category_id=a.category_id,
+            repeat_mode=a.repeat_mode,
+            end_date=a.end_date,
+            days_of_week=a.days_of_week,
+            day_of_month=a.day_of_month,
+            notes=a.notes,
+            mode=a.mode,
+            responsible_ids=[u.id for u in a.responsibles]
+        )
+        for a in activities
+    ]
 
 @app.post("/activities")
 def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
@@ -399,6 +441,16 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
     db.delete(activity)
     db.commit()
     return {"detail": "Activity deleted successfully"}
+
+@app.put("/activity-occurrences/{occurrence_id}/complete")
+def complete_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Occurrence not found")
+    occurrence.complete = True
+    db.commit()
+    db.refresh(occurrence)
+    return occurrence
 
 @app.get("/activities/{activity_id}/todos")
 def get_activity_todos(activity_id: int, db: Session = Depends(get_db)):
