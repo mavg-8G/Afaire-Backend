@@ -207,11 +207,39 @@ def record_history(db: Session, user_id: int, action: str):
 # Routes
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    print(f"Login attempt for username: {form_data.username}")  # Debug log
+    
     user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not pwd_context.verify(form_data.password, user.hashed_password):
+    if not user:
+        print(f"User not found: {form_data.username}")  # Debug log
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    access_token = create_access_token(data={"sub": str(user.id)})
-    return {"access_token": access_token, "token_type": "bearer"}
+    
+    print(f"User found: {user.username}")  # Debug log
+    password_valid = pwd_context.verify(form_data.password, user.hashed_password)
+    print(f"Password valid: {password_valid}")  # Debug log
+    
+    if not password_valid:
+        print(f"Invalid password for user: {user.username}")  # Debug log
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    try:
+        access_token = create_access_token(data={"sub": str(user.id)})
+        print(f"Token created successfully for user: {user.username}")  # Debug log
+        print(f"Token: {access_token[:50]}...")  # Debug log - mostrar solo parte del token
+        
+        response = {
+            "access_token": access_token, 
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username,
+            "is_admin": user.is_admin
+        }
+        print(f"Login successful for user: {user.username}")  # Debug log
+        return response
+    except Exception as e:
+        print(f"Error creating token: {str(e)}")  # Debug log
+        raise HTTPException(status_code=500, detail="Error creating authentication token")
+
 
 @app.get("/users")
 def get_users(db: Session = Depends(get_db)):
@@ -361,11 +389,13 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Category not found")
     
     # Verificar que todos los usuarios responsables existen
+    existing_users = []
     if activity.responsible_ids:
         existing_users = db.query(User).filter(User.id.in_(activity.responsible_ids)).all()
         if len(existing_users) != len(activity.responsible_ids):
             raise HTTPException(status_code=404, detail="One or more users not found")
     
+    # Crear la actividad
     db_activity = Activity(
         title=activity.title,
         start_date=activity.start_date,
@@ -379,18 +409,31 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         mode=activity.mode
     )
     
-    if activity.responsible_ids:
+    # Asignar usuarios responsables
+    if existing_users:
         db_activity.responsibles = existing_users
     
+    # Guardar la actividad primero
     db.add(db_activity)
     db.commit()
-    db.refresh(db_activity)
-
-    for todo in activity.todos:
-        db_todo = Todo(text=todo.text, activity_id=db_activity.id)
+    db.refresh(db_activity)  # Importante: obtener el ID generado
+    
+    # Agregar TODOs después de que la actividad tenga un ID
+    for todo_data in activity.todos:
+        db_todo = Todo(
+            text=todo_data.text, 
+            complete=todo_data.complete,
+            activity_id=db_activity.id
+        )
         db.add(db_todo)
-
+    
+    # Commit final para los TODOs
     db.commit()
+    
+    # Refresh final para obtener la actividad con todas sus relaciones
+    db.refresh(db_activity)
+    
+    print(f"Activity created successfully with ID: {db_activity.id}")  # Debug log
     return db_activity
 
 @app.get("/activities/{activity_id}")
