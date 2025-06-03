@@ -1,6 +1,6 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Depends, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from datetime import datetime, date, time
 from enum import Enum
@@ -155,8 +155,8 @@ class ActivityResponse(BaseModel):
     mode: CategoryMode
     responsible_ids: List[int]
 
-    class Config:
-        orm_mode = True
+    # Pydantic V2: enable model to read from ORM objects
+    model_config = ConfigDict(from_attributes=True)
 
 class ActivityCreate(BaseModel):
     title: str
@@ -173,17 +173,17 @@ class ActivityCreate(BaseModel):
     todos: List[TodoCreate] = []
 
 class ActivityUpdate(BaseModel):
-    title: Optional[str]
-    start_date: Optional[datetime]
-    time: Optional[str]
-    category_id: Optional[int]
-    repeat_mode: Optional[RepeatMode]
-    end_date: Optional[datetime]
-    days_of_week: Optional[List[str]]
-    day_of_month: Optional[int]
-    notes: Optional[str]
-    mode: Optional[CategoryMode]
-    responsible_ids: Optional[List[int]] = []
+    title: Optional[str]                = None
+    start_date: Optional[datetime]      = None
+    time: Optional[str]                 = None
+    category_id: Optional[int]          = None
+    repeat_mode: Optional[RepeatMode]   = None
+    end_date: Optional[datetime]        = None
+    days_of_week: Optional[List[str]]   = None
+    day_of_month: Optional[int]         = None
+    notes: Optional[str]                = None
+    mode: Optional[CategoryMode]        = None
+    responsible_ids: Optional[List[int]]= None
 
 class HistoryCreate(BaseModel):
     action: str
@@ -321,7 +321,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 
 @app.post("/categories")
 def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
-    db_category = Category(**category.dict())
+    db_category = Category(**category.model_dump())
     db.add(db_category)
     db.commit()
     db.refresh(db_category)
@@ -343,7 +343,7 @@ def update_category(category_id: int, category_update: CategoryUpdate, db: Sessi
     category = db.query(Category).filter(Category.id == category_id).first()
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
-    update_data = category_update.dict(exclude_unset=True)
+    update_data = category_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(category, key, value)
     db.commit()
@@ -436,12 +436,25 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
     print(f"Activity created successfully with ID: {db_activity.id}")  # Debug log
     return db_activity
 
-@app.get("/activities/{activity_id}")
+@app.get("/activities/{activity_id}", response_model=ActivityResponse)
 def get_activity(activity_id: int, db: Session = Depends(get_db)):
     activity = db.query(Activity).filter(Activity.id == activity_id).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-    return activity
+    return ActivityResponse(
+        id=activity.id,
+        title=activity.title,
+        start_date=activity.start_date,
+        time=activity.time,
+        category_id=activity.category_id,
+        repeat_mode=activity.repeat_mode,
+        end_date=activity.end_date,
+        days_of_week=activity.days_of_week,
+        day_of_month=activity.day_of_month,
+        notes=activity.notes,
+        mode=activity.mode,
+        responsible_ids=[u.id for u in activity.responsibles]
+    )
 
 @app.put("/activities/{activity_id}")
 def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Session = Depends(get_db)):
@@ -449,7 +462,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    update_data = activity_update.dict(exclude_unset=True)
+    update_data = activity_update.model_dump(exclude_unset=True)
     
     # Validar category_id si se está actualizando
     if "category_id" in update_data:
@@ -525,7 +538,7 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
     todo = db.query(Todo).filter(Todo.id == todo_id).first()
     if not todo:
         raise HTTPException(status_code=404, detail="Todo not found")
-    update_data = todo_update.dict(exclude_unset=True)
+    update_data = todo_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(todo, key, value)
     db.commit()
