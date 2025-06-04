@@ -5,7 +5,7 @@ from typing import List, Optional
 from datetime import datetime, date, time
 from enum import Enum
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from VerificarToken import create_access_token, verify_token
