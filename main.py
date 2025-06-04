@@ -185,6 +185,25 @@ class ActivityUpdate(BaseModel):
     mode: Optional[CategoryMode]        = None
     responsible_ids: Optional[List[int]]= None
 
+class ActivityOccurrenceResponse(BaseModel):
+    id: int
+    activity_id: int
+    date: datetime
+    complete: bool
+    activity_title: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class ActivityOccurrenceCreate(BaseModel):
+    activity_id: int
+    date: datetime
+    complete: bool = False
+
+class ActivityOccurrenceUpdate(BaseModel):
+    date: Optional[datetime] = None
+    complete: Optional[bool] = None
+
+
 class HistoryCreate(BaseModel):
     action: str
     user_id: int
@@ -500,15 +519,137 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
     
     return {"detail": "Activity deleted successfully"}
 
-@app.put("/activity-occurrences/{occurrence_id}/complete")
-def complete_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+# Endpoints para Activity Occurrences
+@app.get("/activity-occurrences")
+def get_all_activity_occurrences(db: Session = Depends(get_db)):
+    """Obtener todas las ocurrencias de actividades"""
+    occurrences = db.query(ActivityOccurrence).all()
+    return [
+        ActivityOccurrenceResponse(
+            id=occ.id,
+            activity_id=occ.activity_id,
+            date=occ.date,
+            complete=occ.complete,
+            activity_title=occ.activity.title if occ.activity else None
+        )
+        for occ in occurrences
+    ]
+
+@app.get("/activity-occurrences/{occurrence_id}")
+def get_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+    """Obtener una ocurrencia específica por ID"""
     occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
     if not occurrence:
-        raise HTTPException(status_code=404, detail="Occurrence not found")
-    occurrence.complete = True
+        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    
+    return ActivityOccurrenceResponse(
+        id=occurrence.id,
+        activity_id=occurrence.activity_id,
+        date=occurrence.date,
+        complete=occurrence.complete,
+        activity_title=occurrence.activity.title if occurrence.activity else None
+    )
+
+@app.post("/activity-occurrences")
+def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session = Depends(get_db)):
+    """Crear una nueva ocurrencia de actividad"""
+    # Verificar que la actividad existe
+    activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    db_occurrence = ActivityOccurrence(
+        activity_id=occurrence.activity_id,
+        date=occurrence.date,
+        complete=occurrence.complete
+    )
+    db.add(db_occurrence)
+    db.commit()
+    db.refresh(db_occurrence)
+    
+    return ActivityOccurrenceResponse(
+        id=db_occurrence.id,
+        activity_id=db_occurrence.activity_id,
+        date=db_occurrence.date,
+        complete=db_occurrence.complete,
+        activity_title=db_occurrence.activity.title if db_occurrence.activity else None
+    )
+
+@app.put("/activity-occurrences/{occurrence_id}")
+def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db)):
+    """Actualizar una ocurrencia de actividad"""
+    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    
+    update_data = occurrence_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(occurrence, key, value)
+    
     db.commit()
     db.refresh(occurrence)
-    return occurrence
+    
+    return ActivityOccurrenceResponse(
+        id=occurrence.id,
+        activity_id=occurrence.activity_id,
+        date=occurrence.date,
+        complete=occurrence.complete,
+        activity_title=occurrence.activity.title if occurrence.activity else None
+    )
+
+@app.delete("/activity-occurrences/{occurrence_id}")
+def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+    """Eliminar una ocurrencia de actividad"""
+    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    
+    db.delete(occurrence)
+    db.commit()
+    return {"detail": "Activity occurrence deleted successfully"}
+
+@app.get("/activities/{activity_id}/occurrences")
+def get_activity_occurrences(activity_id: int, db: Session = Depends(get_db)):
+    """Obtener todas las ocurrencias de una actividad específica"""
+    activity = db.query(Activity).filter(Activity.id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    occurrences = db.query(ActivityOccurrence).filter(ActivityOccurrence.activity_id == activity_id).all()
+    return [
+        ActivityOccurrenceResponse(
+            id=occ.id,
+            activity_id=occ.activity_id,
+            date=occ.date,
+            complete=occ.complete,
+            activity_title=activity.title
+        )
+        for occ in occurrences
+    ]
+
+@app.get("/activity-occurrences/by-date/{date}")
+def get_occurrences_by_date(date: str, db: Session = Depends(get_db)):
+    """Obtener todas las ocurrencias para una fecha específica (formato: YYYY-MM-DD)"""
+    try:
+        target_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    occurrences = db.query(ActivityOccurrence).filter(
+        ActivityOccurrence.date >= datetime.combine(target_date, datetime.min.time()),
+        ActivityOccurrence.date < datetime.combine(target_date, datetime.max.time())
+    ).all()
+    
+    return [
+        ActivityOccurrenceResponse(
+            id=occ.id,
+            activity_id=occ.activity_id,
+            date=occ.date,
+            complete=occ.complete,
+            activity_title=occ.activity.title if occ.activity else None
+        )
+        for occ in occurrences
+    ]
 
 @app.get("/activities/{activity_id}/todos")
 def get_activity_todos(activity_id: int, db: Session = Depends(get_db)):
