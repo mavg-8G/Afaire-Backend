@@ -78,7 +78,7 @@ class Activity(Base):
     mode = Column(SqlEnum(CategoryMode), nullable=False)
     category = relationship("Category")
     responsibles = relationship("User", secondary=activity_user, backref="activities")
-    todos = relationship("Todo", back_populates="activity")
+    todos = relationship("Todo", back_populates="activity", cascade="all, delete-orphan")
 
 class ActivityOccurrence(Base):
     __tablename__ = 'activity_occurrences'
@@ -86,7 +86,7 @@ class ActivityOccurrence(Base):
     activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
     date = Column(DateTime, nullable=False)
     complete = Column(Boolean, default=False, nullable=False)
-    activity = relationship("Activity", backref="occurrences")
+    activity = relationship("Activity", backref=backref("occurrences", cascade="all, delete-orphan"))
 
 class Todo(Base):
     __tablename__ = 'todos'
@@ -494,8 +494,10 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
     activity = db.query(Activity).filter(Activity.id == activity_id).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    
     db.delete(activity)
     db.commit()
+    
     return {"detail": "Activity deleted successfully"}
 
 @app.put("/activity-occurrences/{occurrence_id}/complete")
