@@ -1585,16 +1585,12 @@ def create_history(history: HistoryCreate, db: Session = Depends(get_db)):
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     """Handle SQLAlchemy database errors securely"""
     error_id = SecureErrorResponse.generate_error_id()
-    
-    # Log detailed error information server-side
     SecureErrorResponse.log_detailed_error(
         error_id=error_id,
         error=exc,
         request=request,
         additional_context={"error_category": "database", "error_type": type(exc).__name__}
     )
-    
-    # Return generic database error response
     if isinstance(exc, IntegrityError):
         if "UNIQUE constraint failed" in str(exc):
             return SecureErrorResponse.conflict_error("Resource already exists", error_id)
@@ -1602,16 +1598,12 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
             return SecureErrorResponse.validation_error("Invalid reference data", error_id)
         else:
             return SecureErrorResponse.database_error("Data integrity error", error_id)
-    
     return SecureErrorResponse.database_error("Database operation failed", error_id)
-
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions with sanitized messages"""
     error_id = SecureErrorResponse.generate_error_id()
-    
-    # Log HTTP exceptions for monitoring
     SecureErrorResponse.log_detailed_error(
         error_id=error_id,
         error=exc,
@@ -1622,37 +1614,35 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "original_detail": exc.detail
         }
     )
-    
-    # Sanitize the error message
+    # Sanitize the detail message
+    from error_handlers import sanitize_error_message
     sanitized_detail = sanitize_error_message(str(exc.detail))
-    
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "detail": sanitized_detail,
-            "error_id": error_id
-        }
-    )
-
+    # Map status codes to error categories
+    if exc.status_code == 400:
+        return SecureErrorResponse.validation_error(sanitized_detail, error_id)
+    elif exc.status_code == 401:
+        return SecureErrorResponse.authentication_error(sanitized_detail, error_id)
+    elif exc.status_code == 403:
+        return SecureErrorResponse.authorization_error(sanitized_detail, error_id)
+    elif exc.status_code == 404:
+        return SecureErrorResponse.not_found_error(sanitized_detail, error_id)
+    elif exc.status_code == 409:
+        return SecureErrorResponse.conflict_error(sanitized_detail, error_id)
+    elif exc.status_code == 429:
+        return SecureErrorResponse.rate_limit_error(sanitized_detail, error_id)
+    else:
+        return SecureErrorResponse.internal_server_error(sanitized_detail, error_id)
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    """Handle all other unexpected exceptions"""
     error_id = SecureErrorResponse.generate_error_id()
-    
-    # Log detailed error information server-side
     SecureErrorResponse.log_detailed_error(
         error_id=error_id,
         error=exc,
         request=request,
-        additional_context={"error_category": "unexpected", "error_type": type(exc).__name__}
+        additional_context={"error_category": "unexpected"}
     )
-    
-    # Return generic internal server error
-    return SecureErrorResponse.internal_server_error(
-        "An internal server error occurred. Please contact support if the problem persists.",
-        error_id
-    )
+    return SecureErrorResponse.internal_server_error("An internal server error occurred", error_id)
 
 if __name__ == "__main__":
     import uvicorn
