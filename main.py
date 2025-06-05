@@ -1,16 +1,82 @@
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Depends, Response
-from pydantic import BaseModel, ConfigDict
+from fastapi import FastAPI, HTTPException, Depends, Response, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 from typing import List, Optional
 from datetime import datetime, date, time
 from enum import Enum
+import re
+import html
+import bleach
+import logging
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from VerificarToken import create_access_token, verify_token
+from validation_utils import (
+    ValidationConstants, sanitize_string, validate_username, validate_password,
+    validate_time_format, validate_icon_name, validate_days_of_week,
+    validate_day_of_month, validate_datetime_not_past, validate_end_date_after_start,
+    validate_user_ids, validate_positive_integer
+)
+from error_handlers import (
+    SecureErrorResponse, handle_database_error, handle_validation_error,
+    handle_generic_exception, sanitize_error_message
+)
 
 app = FastAPI()
+
+# Custom exception handlers for comprehensive error handling
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors with secure error messages"""
+    return handle_validation_error(exc, request)
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    """Handle ValueError exceptions from custom validation"""
+    return handle_validation_error(exc, request)
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_error_handler(request: Request, exc: ValidationError):
+    """Handle Pydantic ValidationError exceptions"""
+    return handle_validation_error(exc, request)
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
+    """Handle database errors securely"""
+    return handle_database_error(exc, request)
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions with consistent formatting"""
+    error_id = SecureErrorResponse.generate_error_id()
+    
+    # Log the error for tracking
+    SecureErrorResponse.log_detailed_error(
+        error_id=error_id,
+        error=exc,
+        request=request,
+        additional_context={"status_code": exc.status_code, "detail": exc.detail}
+    )
+    
+    # Return consistent error format
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": f"HTTP_{exc.status_code}",
+            "message": sanitize_error_message(str(exc.detail)),
+            "error_id": error_id
+        }
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions securely"""
+    return handle_generic_exception(exc, request)
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,40 +172,173 @@ class History(Base):
 
 Base.metadata.create_all(bind=db_engine)
 
-# Schemas
+# Schemas with comprehensive validation
 class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
+    old_password: str = Field(..., min_length=1, max_length=ValidationConstants.MAX_PASSWORD_LENGTH)
+    new_password: str = Field(..., min_length=ValidationConstants.MIN_PASSWORD_LENGTH, max_length=ValidationConstants.MAX_PASSWORD_LENGTH)
+    
+    @field_validator('old_password', 'new_password')
+    @classmethod
+    def sanitize_passwords(cls, v):
+        if not isinstance(v, str):
+            raise ValueError("Password must be a string")
+        return v.strip()
+    
+    @field_validator('new_password')
+    @classmethod
+    def validate_new_password_strength(cls, v):
+        return validate_password(v)
+
 
 class UserCreate(BaseModel):
-    name: str
-    username: str
-    password: str
-    is_admin: bool = False 
+    name: str = Field(..., min_length=ValidationConstants.MIN_NAME_LENGTH, max_length=ValidationConstants.MAX_NAME_LENGTH)
+    username: str = Field(..., min_length=ValidationConstants.MIN_USERNAME_LENGTH, max_length=ValidationConstants.MAX_USERNAME_LENGTH)
+    password: str = Field(..., min_length=ValidationConstants.MIN_PASSWORD_LENGTH, max_length=ValidationConstants.MAX_PASSWORD_LENGTH)
+    is_admin: bool = Field(default=False)
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return sanitize_string(v, ValidationConstants.MAX_NAME_LENGTH)
+    
+    @field_validator('username')
+    @classmethod
+    def validate_username_format(cls, v):
+        return validate_username(v)
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v):
+        return validate_password(v)
+    
+    @field_validator('is_admin')
+    @classmethod
+    def validate_is_admin(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError("is_admin must be a boolean")
+        return v
+
 
 class UserUpdate(BaseModel):
-    name: Optional[str] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=ValidationConstants.MIN_NAME_LENGTH, max_length=ValidationConstants.MAX_NAME_LENGTH)
+    username: Optional[str] = Field(None, min_length=ValidationConstants.MIN_USERNAME_LENGTH, max_length=ValidationConstants.MAX_USERNAME_LENGTH)
+    password: Optional[str] = Field(None, min_length=ValidationConstants.MIN_PASSWORD_LENGTH, max_length=ValidationConstants.MAX_PASSWORD_LENGTH)
     is_admin: Optional[bool] = None
+    
+    @field_validator('name', mode='before')
+    @classmethod
+    def validate_name(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_NAME_LENGTH)
+        return v
+    
+    @field_validator('username', mode='before')
+    @classmethod
+    def validate_username_format(cls, v):
+        if v is not None:
+            return validate_username(v)
+        return v
+    
+    @field_validator('password', mode='before')
+    @classmethod
+    def validate_password_strength(cls, v):
+        if v is not None:
+            return validate_password(v)
+        return v
+    
+    @field_validator('is_admin')
+    @classmethod
+    def validate_is_admin(cls, v):
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("is_admin must be a boolean")
+        return v
+
 
 class CategoryCreate(BaseModel):
-    name: str
-    icon_name: str
+    name: str = Field(..., min_length=ValidationConstants.MIN_NAME_LENGTH, max_length=ValidationConstants.MAX_NAME_LENGTH)
+    icon_name: str = Field(..., min_length=1, max_length=ValidationConstants.MAX_ICON_NAME_LENGTH)
     mode: CategoryMode
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return sanitize_string(v, ValidationConstants.MAX_NAME_LENGTH)
+    
+    @field_validator('icon_name')
+    @classmethod
+    def validate_icon_name_format(cls, v):
+        return validate_icon_name(v)
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        if not isinstance(v, CategoryMode):
+            raise ValueError(f"Mode must be one of: {', '.join([mode.value for mode in CategoryMode])}")
+        return v
+
 
 class CategoryUpdate(BaseModel):
-    name: Optional[str] = None
-    icon_name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=ValidationConstants.MIN_NAME_LENGTH, max_length=ValidationConstants.MAX_NAME_LENGTH)
+    icon_name: Optional[str] = Field(None, min_length=1, max_length=ValidationConstants.MAX_ICON_NAME_LENGTH)
     mode: Optional[CategoryMode] = None
+    
+    @field_validator('name', mode='before')
+    @classmethod
+    def validate_name(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_NAME_LENGTH)
+        return v
+    
+    @field_validator('icon_name', mode='before')
+    @classmethod
+    def validate_icon_name_format(cls, v):
+        if v is not None:
+            return validate_icon_name(v)
+        return v
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        if v is not None and not isinstance(v, CategoryMode):
+            raise ValueError(f"Mode must be one of: {', '.join([mode.value for mode in CategoryMode])}")
+        return v
+
 
 class TodoCreate(BaseModel):
-    text: str
-    complete: bool = False
+    text: str = Field(..., min_length=1, max_length=ValidationConstants.MAX_TODO_TEXT_LENGTH)
+    complete: bool = Field(default=False)
+    
+    @field_validator('text')
+    @classmethod
+    def validate_text(cls, v):
+        return sanitize_string(v, ValidationConstants.MAX_TODO_TEXT_LENGTH)
+    
+    @field_validator('complete')
+    @classmethod
+    def validate_complete(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError("complete must be a boolean")
+        return v
+
 
 class TodoUpdate(BaseModel):
-    text: Optional[str] = None
+    text: Optional[str] = Field(None, min_length=1, max_length=ValidationConstants.MAX_TODO_TEXT_LENGTH)
     complete: Optional[bool] = None
+    
+    @field_validator('text', mode='before')
+    @classmethod
+    def validate_text(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_TODO_TEXT_LENGTH)
+        return v
+    
+    @field_validator('complete')
+    @classmethod
+    def validate_complete(cls, v):
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("complete must be a boolean")
+        return v
+
 
 class ActivityResponse(BaseModel):
     id: int
@@ -158,32 +357,180 @@ class ActivityResponse(BaseModel):
     # Pydantic V2: enable model to read from ORM objects
     model_config = ConfigDict(from_attributes=True)
 
+
 class ActivityCreate(BaseModel):
-    title: str
-    start_date: datetime
-    time: str
-    category_id: int
-    repeat_mode: RepeatMode = RepeatMode.none
+    title: str = Field(..., min_length=1, max_length=ValidationConstants.MAX_TITLE_LENGTH)
+    start_date: datetime = Field(...)
+    time: str = Field(..., min_length=1, max_length=5)
+    category_id: int = Field(..., gt=0)
+    repeat_mode: RepeatMode = Field(default=RepeatMode.none)
     end_date: Optional[datetime] = None
     days_of_week: Optional[List[str]] = None
-    day_of_month: Optional[int] = None
-    notes: Optional[str] = None
+    day_of_month: Optional[int] = Field(None, ge=ValidationConstants.MIN_DAY_OF_MONTH, le=ValidationConstants.MAX_DAY_OF_MONTH)
+    notes: Optional[str] = Field(None, max_length=ValidationConstants.MAX_NOTES_LENGTH)
     mode: CategoryMode
-    responsible_ids: List[int] = []
-    todos: List[TodoCreate] = []
+    responsible_ids: List[int] = Field(default=[])
+    todos: List[TodoCreate] = Field(default=[])
+    
+    @field_validator('title')
+    @classmethod
+    def validate_title(cls, v):
+        return sanitize_string(v, ValidationConstants.MAX_TITLE_LENGTH)
+    
+    @field_validator('time')
+    @classmethod
+    def validate_time_format(cls, v):
+        return validate_time_format(v)
+    
+    @field_validator('category_id')
+    @classmethod
+    def validate_category_id(cls, v):
+        return validate_positive_integer(v, "category_id")
+    
+    @field_validator('repeat_mode')
+    @classmethod
+    def validate_repeat_mode(cls, v):
+        if not isinstance(v, RepeatMode):
+            raise ValueError(f"Repeat mode must be one of: {', '.join([mode.value for mode in RepeatMode])}")
+        return v
+    
+    @field_validator('days_of_week', mode='before')
+    @classmethod
+    def validate_days_of_week_list(cls, v):
+        if v is not None:
+            return validate_days_of_week(v)
+        return v
+    
+    @field_validator('day_of_month', mode='before')
+    @classmethod
+    def validate_day_of_month_range(cls, v):
+        if v is not None:
+            return validate_day_of_month(v)
+        return v
+    
+    @field_validator('notes', mode='before')
+    @classmethod
+    def validate_notes(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_NOTES_LENGTH)
+        return v
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        if not isinstance(v, CategoryMode):
+            raise ValueError(f"Mode must be one of: {', '.join([mode.value for mode in CategoryMode])}")
+        return v
+    
+    @field_validator('responsible_ids')
+    @classmethod
+    def validate_responsible_ids(cls, v):
+        return validate_user_ids(v)
+    
+    @field_validator('todos')
+    @classmethod
+    def validate_todos_list(cls, v):
+        if not isinstance(v, list):
+            raise ValueError("todos must be a list")
+        if len(v) > 50:  # Reasonable limit
+            raise ValueError("Too many todos (maximum 50)")
+        return v
+    
+    @model_validator(mode='after')
+    def validate_end_date_logic(self):
+        start_date = self.start_date
+        end_date = self.end_date
+        repeat_mode = self.repeat_mode
+        
+        if start_date and end_date:
+            self.end_date = validate_end_date_after_start(start_date, end_date)
+        
+        # If repeat mode is not 'none', validate related fields
+        if repeat_mode and repeat_mode != RepeatMode.none:
+            if repeat_mode == RepeatMode.weekly and not self.days_of_week:
+                raise ValueError("days_of_week is required for weekly repeat mode")
+            elif repeat_mode == RepeatMode.monthly and not self.day_of_month:
+                raise ValueError("day_of_month is required for monthly repeat mode")
+        
+        return self
+
 
 class ActivityUpdate(BaseModel):
-    title: Optional[str]                = None
-    start_date: Optional[datetime]      = None
-    time: Optional[str]                 = None
-    category_id: Optional[int]          = None
-    repeat_mode: Optional[RepeatMode]   = None
-    end_date: Optional[datetime]        = None
-    days_of_week: Optional[List[str]]   = None
-    day_of_month: Optional[int]         = None
-    notes: Optional[str]                = None
-    mode: Optional[CategoryMode]        = None
-    responsible_ids: Optional[List[int]]= None
+    title: Optional[str] = Field(None, min_length=1, max_length=ValidationConstants.MAX_TITLE_LENGTH)
+    start_date: Optional[datetime] = None
+    time: Optional[str] = Field(None, min_length=1, max_length=5)
+    category_id: Optional[int] = Field(None, gt=0)
+    repeat_mode: Optional[RepeatMode] = None
+    end_date: Optional[datetime] = None
+    days_of_week: Optional[List[str]] = None
+    day_of_month: Optional[int] = Field(None, ge=ValidationConstants.MIN_DAY_OF_MONTH, le=ValidationConstants.MAX_DAY_OF_MONTH)
+    notes: Optional[str] = Field(None, max_length=ValidationConstants.MAX_NOTES_LENGTH)
+    mode: Optional[CategoryMode] = None
+    responsible_ids: Optional[List[int]] = None
+    
+    @field_validator('title', mode='before')
+    @classmethod
+    def validate_title(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_TITLE_LENGTH)
+        return v
+    
+    @field_validator('time', mode='before')
+    @classmethod
+    def validate_time_format(cls, v):
+        if v is not None:
+            return validate_time_format(v)
+        return v
+    
+    @field_validator('category_id', mode='before')
+    @classmethod
+    def validate_category_id(cls, v):
+        if v is not None:
+            return validate_positive_integer(v, "category_id")
+        return v
+    
+    @field_validator('repeat_mode')
+    @classmethod
+    def validate_repeat_mode(cls, v):
+        if v is not None and not isinstance(v, RepeatMode):
+            raise ValueError(f"Repeat mode must be one of: {', '.join([mode.value for mode in RepeatMode])}")
+        return v
+    
+    @field_validator('days_of_week', mode='before')
+    @classmethod
+    def validate_days_of_week_list(cls, v):
+        if v is not None:
+            return validate_days_of_week(v)
+        return v
+    
+    @field_validator('day_of_month', mode='before')
+    @classmethod
+    def validate_day_of_month_range(cls, v):
+        if v is not None:
+            return validate_day_of_month(v)
+        return v
+    
+    @field_validator('notes', mode='before')
+    @classmethod
+    def validate_notes(cls, v):
+        if v is not None:
+            return sanitize_string(v, ValidationConstants.MAX_NOTES_LENGTH)
+        return v
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        if v is not None and not isinstance(v, CategoryMode):
+            raise ValueError(f"Mode must be one of: {', '.join([mode.value for mode in CategoryMode])}")
+        return v
+    
+    @field_validator('responsible_ids', mode='before')
+    @classmethod
+    def validate_responsible_ids(cls, v):
+        if v is not None:
+            return validate_user_ids(v)
+        return v
+
 
 class ActivityOccurrenceResponse(BaseModel):
     id: int
@@ -194,19 +541,50 @@ class ActivityOccurrenceResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class ActivityOccurrenceCreate(BaseModel):
-    activity_id: int
-    date: datetime
-    complete: bool = False
+    activity_id: int = Field(..., gt=0)
+    date: datetime = Field(...)
+    complete: bool = Field(default=False)
+    
+    @field_validator('activity_id')
+    @classmethod
+    def validate_activity_id(cls, v):
+        return validate_positive_integer(v, "activity_id")
+    
+    @field_validator('complete')
+    @classmethod
+    def validate_complete(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError("complete must be a boolean")
+        return v
+
 
 class ActivityOccurrenceUpdate(BaseModel):
     date: Optional[datetime] = None
     complete: Optional[bool] = None
+    
+    @field_validator('complete')
+    @classmethod
+    def validate_complete(cls, v):
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("complete must be a boolean")
+        return v
 
 
 class HistoryCreate(BaseModel):
-    action: str
-    user_id: int
+    action: str = Field(..., min_length=1, max_length=ValidationConstants.MAX_ACTION_LENGTH)
+    user_id: int = Field(..., gt=0)
+    
+    @field_validator('action')
+    @classmethod
+    def validate_action(cls, v):
+        return sanitize_string(v, ValidationConstants.MAX_ACTION_LENGTH)
+    
+    @field_validator('user_id')
+    @classmethod
+    def validate_user_id(cls, v):
+        return validate_positive_integer(v, "user_id")
 # Dependency
 def get_db():
     db = SessionLocal()
@@ -226,38 +604,62 @@ def record_history(db: Session, user_id: int, action: str):
 # Routes
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    print(f"Login attempt for username: {form_data.username}")  # Debug log
-    
-    user = db.query(User).filter(User.username == form_data.username).first()
-    if not user:
-        print(f"User not found: {form_data.username}")  # Debug log
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-    
-    print(f"User found: {user.username}")  # Debug log
-    password_valid = pwd_context.verify(form_data.password, user.hashed_password)
-    print(f"Password valid: {password_valid}")  # Debug log
-    
-    if not password_valid:
-        print(f"Invalid password for user: {user.username}")  # Debug log
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-    
     try:
-        access_token = create_access_token(data={"sub": str(user.id)})
-        print(f"Token created successfully for user: {user.username}")  # Debug log
-        print(f"Token: {access_token[:50]}...")  # Debug log - mostrar solo parte del token
+        # Sanitize input
+        username = sanitize_string(form_data.username, ValidationConstants.MAX_USERNAME_LENGTH).lower()
+        password = form_data.password
         
-        response = {
-            "access_token": access_token, 
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username,
-            "is_admin": user.is_admin
-        }
-        print(f"Login successful for user: {user.username}")  # Debug log
-        return response
+        # Additional validation
+        if not username:
+            return SecureErrorResponse.validation_error("Invalid credentials")
+        if not password:
+            return SecureErrorResponse.validation_error("Invalid credentials")
+        
+        # Validate username format
+        try:
+            validate_username(username)
+        except ValueError:
+            # Don't reveal that username format is invalid for security
+            return SecureErrorResponse.authentication_error("Invalid credentials")
+        
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            return SecureErrorResponse.authentication_error("Invalid credentials")
+        
+        password_valid = pwd_context.verify(password, user.hashed_password)
+        
+        if not password_valid:
+            return SecureErrorResponse.authentication_error("Invalid credentials")
+        
+        try:
+            access_token = create_access_token(data={"sub": str(user.id)})
+            
+            response = {
+                "access_token": access_token, 
+                "token_type": "bearer",
+                "user_id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin
+            }
+            return response
+        except Exception as token_error:
+            error_id = SecureErrorResponse.generate_error_id()
+            SecureErrorResponse.log_detailed_error(
+                error_id=error_id,
+                error=token_error,
+                additional_context={"operation": "token_creation", "user_id": user.id}
+            )
+            return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
+    
     except Exception as e:
-        print(f"Error creating token: {str(e)}")  # Debug log
-        raise HTTPException(status_code=500, detail="Error creating authentication token")
+        # Log detailed error and return generic response
+        error_id = SecureErrorResponse.generate_error_id()
+        SecureErrorResponse.log_detailed_error(
+            error_id=error_id,
+            error=e,
+            additional_context={"operation": "login"}
+        )
+        return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
 
 @app.get("/users")
@@ -266,52 +668,100 @@ def get_users(db: Session = Depends(get_db)):
 
 @app.get("/users/{user_id}")
 def get_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+    try:
+        # Validate user_id
+        if user_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid user ID")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return SecureErrorResponse.not_found_error("User not found")
+        return user
+    
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.post("/users")
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.username == user.username).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Username already exists")
+    try:
+        # Additional server-side validation
+        if not user.name.strip():
+            return SecureErrorResponse.validation_error("Name cannot be empty")
+        
+        # Check if username already exists (case-insensitive)
+        existing_user = db.query(User).filter(User.username.ilike(user.username)).first()
+        if existing_user:
+            return SecureErrorResponse.conflict_error("Username already exists")
+        
+        # Additional password validation in case frontend validation was bypassed
+        try:
+            validate_password(user.password)
+        except ValueError as e:
+            return SecureErrorResponse.validation_error(str(e))
+        
+        db_user = User(
+            name=user.name,
+            username=user.username.lower(),  # Store username in lowercase
+            hashed_password=get_password_hash(user.password),
+            is_admin=user.is_admin
+        )
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return db_user
     
-    db_user = User(
-        name=user.name,
-        username=user.username,
-        hashed_password=get_password_hash(user.password),
-        is_admin=user.is_admin
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+    except Exception as e:
+        # Rollback transaction on error
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "create_user"})
 
 
 @app.put("/users/{user_id}")
 def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        # Validate user_id
+        if user_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid user ID")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return SecureErrorResponse.not_found_error("User not found")
+        
+        # Check if username already exists (case-insensitive, excluding current user)
+        if user_update.username is not None:
+            existing_user = db.query(User).filter(
+                User.username.ilike(user_update.username), 
+                User.id != user_id
+            ).first()
+            if existing_user:
+                return SecureErrorResponse.conflict_error("Username already exists")
+        
+        # Additional password validation if password is being updated
+        if user_update.password is not None:
+            try:
+                validate_password(user_update.password)
+            except ValueError as e:
+                return SecureErrorResponse.validation_error(str(e))
+        
+        # Update fields
+        if user_update.name is not None:
+            if not user_update.name.strip():
+                return SecureErrorResponse.validation_error("Name cannot be empty")
+            user.name = user_update.name
+        if user_update.username is not None:
+            user.username = user_update.username.lower()  # Store username in lowercase
+        if user_update.password is not None:
+            user.hashed_password = get_password_hash(user_update.password)
+        if user_update.is_admin is not None:
+            user.is_admin = user_update.is_admin
+        
+        db.commit()
+        db.refresh(user)
+        return user
     
-    if user_update.username is not None:
-        existing_user = db.query(User).filter(User.username == user_update.username, User.id != user_id).first()
-        if existing_user:
-            raise HTTPException(status_code=400, detail="Username already exists")
-    
-    if user_update.name is not None:
-        user.name = user_update.name
-    if user_update.username is not None:
-        user.username = user_update.username
-    if user_update.password is not None:
-        user.hashed_password = get_password_hash(user_update.password)
-    if user_update.is_admin is not None:
-        user.is_admin = user_update.is_admin  # Update is_admin
-    
-    db.commit()
-    db.refresh(user)
-    return user
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "update_user", "user_id": user_id})
 
 @app.post("/users/{user_id}/change-password")
 def change_password(
@@ -319,32 +769,86 @@ def change_password(
     req: ChangePasswordRequest,
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not pwd_context.verify(req.old_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Old password is incorrect")
-    user.hashed_password = get_password_hash(req.new_password)
-    db.commit()
-    return {"detail": "Password updated successfully"}
+    try:
+        # Validate user_id
+        if user_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid user ID")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return SecureErrorResponse.not_found_error("User not found")
+        
+        # Verify old password
+        if not pwd_context.verify(req.old_password, user.hashed_password):
+            return SecureErrorResponse.authentication_error("Old password is incorrect")
+        
+        # Ensure new password is different from old password
+        if pwd_context.verify(req.new_password, user.hashed_password):
+            return SecureErrorResponse.validation_error("New password must be different from current password")
+        
+        # Additional validation for new password (already validated in Pydantic model)
+        try:
+            validate_password(req.new_password)
+        except ValueError as e:
+            return SecureErrorResponse.validation_error(str(e))
+        
+        user.hashed_password = get_password_hash(req.new_password)
+        db.commit()
+        return {"detail": "Password updated successfully"}
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "change_password", "user_id": user_id})
 
 
 @app.delete("/users/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
-    db.commit()
-    return {"message": "User deleted successfully"}
+    try:
+        # Validate user_id
+        if user_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid user ID")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return SecureErrorResponse.not_found_error("User not found")
+        
+        # Check if user has associated activities before deletion
+        user_activities = db.query(Activity).join(activity_user).filter(activity_user.c.user_id == user_id).first()
+        if user_activities:
+            return SecureErrorResponse.conflict_error("Cannot delete user with associated activities")
+        
+        db.delete(user)
+        db.commit()
+        return {"detail": "User deleted successfully"}
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "delete_user", "user_id": user_id})
 
 @app.post("/categories")
 def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
-    db_category = Category(**category.model_dump())
-    db.add(db_category)
-    db.commit()
-    db.refresh(db_category)
-    return db_category
+    try:
+        # Additional server-side validation
+        if not category.name.strip():
+            return SecureErrorResponse.validation_error("Category name cannot be empty")
+        
+        if not category.icon_name.strip():
+            return SecureErrorResponse.validation_error("Icon name cannot be empty")
+        
+        # Check for duplicate category names (case-insensitive)
+        existing_category = db.query(Category).filter(Category.name.ilike(category.name)).first()
+        if existing_category:
+            return SecureErrorResponse.conflict_error("Category name already exists")
+        
+        db_category = Category(**category.model_dump())
+        db.add(db_category)
+        db.commit()
+        db.refresh(db_category)
+        return db_category
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "create_category"})
 
 @app.get("/categories")
 def get_categories(db: Session = Depends(get_db)):
@@ -352,31 +856,79 @@ def get_categories(db: Session = Depends(get_db)):
 
 @app.get("/categories/{category_id}")
 def get_category(category_id: int, db: Session = Depends(get_db)):
-    category = db.query(Category).filter(Category.id == category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    return category
+    try:
+        # Validate category_id
+        if category_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid category ID")
+        
+        category = db.query(Category).filter(Category.id == category_id).first()
+        if not category:
+            return SecureErrorResponse.not_found_error("Category not found")
+        return category
+    
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.put("/categories/{category_id}")
 def update_category(category_id: int, category_update: CategoryUpdate, db: Session = Depends(get_db)):
-    category = db.query(Category).filter(Category.id == category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    update_data = category_update.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(category, key, value)
-    db.commit()
-    db.refresh(category)
-    return category
+    try:
+        # Validate category_id
+        if category_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid category ID")
+        
+        category = db.query(Category).filter(Category.id == category_id).first()
+        if not category:
+            return SecureErrorResponse.not_found_error("Category not found")
+        
+        # Check for duplicate category names if name is being updated
+        if category_update.name is not None:
+            if not category_update.name.strip():
+                return SecureErrorResponse.validation_error("Category name cannot be empty")
+            
+            existing_category = db.query(Category).filter(
+                Category.name.ilike(category_update.name), 
+                Category.id != category_id
+            ).first()
+            if existing_category:
+                return SecureErrorResponse.conflict_error("Category name already exists")
+        
+        if category_update.icon_name is not None and not category_update.icon_name.strip():
+            return SecureErrorResponse.validation_error("Icon name cannot be empty")
+        
+        update_data = category_update.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(category, key, value)
+        db.commit()
+        db.refresh(category)
+        return category
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "update_category", "category_id": category_id})
 
 @app.delete("/categories/{category_id}")
 def delete_category(category_id: int, db: Session = Depends(get_db)):
-    category = db.query(Category).filter(Category.id == category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    db.delete(category)
-    db.commit()
-    return {"detail": "Category deleted"}
+    try:
+        # Validate category_id
+        if category_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid category ID")
+        
+        category = db.query(Category).filter(Category.id == category_id).first()
+        if not category:
+            return SecureErrorResponse.not_found_error("Category not found")
+        
+        # Check if category is being used by any activities
+        category_activities = db.query(Activity).filter(Activity.category_id == category_id).first()
+        if category_activities:
+            return SecureErrorResponse.conflict_error("Cannot delete category that is being used by activities")
+        
+        db.delete(category)
+        db.commit()
+        return {"detail": "Category deleted successfully"}
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "delete_category", "category_id": category_id})
 
 @app.get("/activities", response_model=List[ActivityResponse])
 def get_activities(db: Session = Depends(get_db)):
@@ -402,122 +954,245 @@ def get_activities(db: Session = Depends(get_db)):
 
 @app.post("/activities")
 def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
-    # Verificar que la categoría existe
-    category = db.query(Category).filter(Category.id == activity.category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    
-    # Verificar que todos los usuarios responsables existen
-    existing_users = []
-    if activity.responsible_ids:
-        existing_users = db.query(User).filter(User.id.in_(activity.responsible_ids)).all()
-        if len(existing_users) != len(activity.responsible_ids):
-            raise HTTPException(status_code=404, detail="One or more users not found")
-    
-    # Crear la actividad
-    db_activity = Activity(
-        title=activity.title,
-        start_date=activity.start_date,
-        time=activity.time,
-        category_id=activity.category_id,
-        repeat_mode=activity.repeat_mode,
-        end_date=activity.end_date,
-        days_of_week=','.join(activity.days_of_week or []),
-        day_of_month=activity.day_of_month,
-        notes=activity.notes,
-        mode=activity.mode
-    )
-    
-    # Asignar usuarios responsables
-    if existing_users:
-        db_activity.responsibles = existing_users
-    
-    # Guardar la actividad primero
-    db.add(db_activity)
-    db.commit()
-    db.refresh(db_activity)  # Importante: obtener el ID generado
-    
-    # Agregar TODOs después de que la actividad tenga un ID
-    for todo_data in activity.todos:
-        db_todo = Todo(
-            text=todo_data.text, 
-            complete=todo_data.complete,
-            activity_id=db_activity.id
+    try:
+        # Additional server-side validation
+        if not activity.title.strip():
+            return SecureErrorResponse.validation_error("Activity title cannot be empty")
+        
+        # Validate start_date is not too far in the past (allow some flexibility for scheduling)
+        if activity.start_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+            return SecureErrorResponse.validation_error("Start date cannot be in the past")
+        
+        # Verify category exists and is valid
+        category = db.query(Category).filter(Category.id == activity.category_id).first()
+        if not category:
+            return SecureErrorResponse.not_found_error("Category not found")
+        
+        # Validate mode matches category mode or is compatible
+        if activity.mode not in [category.mode, CategoryMode.both]:
+            if category.mode != CategoryMode.both:
+                return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
+        
+        # Verify all responsible users exist
+        existing_users = []
+        if activity.responsible_ids:
+            # Remove duplicates and validate
+            unique_ids = list(set(activity.responsible_ids))
+            if len(unique_ids) != len(activity.responsible_ids):
+                return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
+            
+            existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
+            if len(existing_users) != len(unique_ids):
+                missing_ids = set(unique_ids) - {user.id for user in existing_users}
+                return SecureErrorResponse.not_found_error(f"Users not found: {list(missing_ids)}")
+        
+        # Validate repeat mode logic
+        if activity.repeat_mode == RepeatMode.weekly:
+            if not activity.days_of_week:
+                return SecureErrorResponse.validation_error("days_of_week is required for weekly repeat mode")
+            if len(activity.days_of_week) == 0:
+                return SecureErrorResponse.validation_error("At least one day must be specified for weekly repeat")
+        elif activity.repeat_mode == RepeatMode.monthly:
+            if activity.day_of_month is None:
+                return SecureErrorResponse.validation_error("day_of_month is required for monthly repeat mode")
+        
+        # Validate end_date logic
+        if activity.end_date:
+            if activity.end_date <= activity.start_date:
+                return SecureErrorResponse.validation_error("End date must be after start date")
+            if activity.repeat_mode == RepeatMode.none:
+                return SecureErrorResponse.validation_error("End date is only valid for repeating activities")
+        
+        # Validate todos
+        if len(activity.todos) > 50:
+            return SecureErrorResponse.validation_error("Too many todos (maximum 50 per activity)")
+        
+        # Create the activity
+        db_activity = Activity(
+            title=activity.title.strip(),
+            start_date=activity.start_date,
+            time=activity.time,
+            category_id=activity.category_id,
+            repeat_mode=activity.repeat_mode,
+            end_date=activity.end_date,
+            days_of_week=','.join(activity.days_of_week or []),
+            day_of_month=activity.day_of_month,
+            notes=activity.notes.strip() if activity.notes else None,
+            mode=activity.mode
         )
-        db.add(db_todo)
+        
+        # Assign responsible users
+        if existing_users:
+            db_activity.responsibles = existing_users
+        
+        # Save activity first
+        db.add(db_activity)
+        db.commit()
+        db.refresh(db_activity)
+        
+        # Add TODOs after activity has an ID
+        for todo_data in activity.todos:
+            if not todo_data.text.strip():
+                return SecureErrorResponse.validation_error("Todo text cannot be empty")
+            
+            db_todo = Todo(
+                text=todo_data.text.strip(), 
+                complete=todo_data.complete,
+                activity_id=db_activity.id
+            )
+            db.add(db_todo)
+        
+        # Final commit for TODOs
+        db.commit()
+        db.refresh(db_activity)
+        
+        print(f"Activity created successfully with ID: {db_activity.id}")  # Debug log
+        return db_activity
     
-    # Commit final para los TODOs
-    db.commit()
-    
-    # Refresh final para obtener la actividad con todas sus relaciones
-    db.refresh(db_activity)
-    
-    print(f"Activity created successfully with ID: {db_activity.id}")  # Debug log
-    return db_activity
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "create_activity"})
 
 @app.get("/activities/{activity_id}", response_model=ActivityResponse)
 def get_activity(activity_id: int, db: Session = Depends(get_db)):
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    return ActivityResponse(
-        id=activity.id,
-        title=activity.title,
-        start_date=activity.start_date,
-        time=activity.time,
-        category_id=activity.category_id,
-        repeat_mode=activity.repeat_mode,
-        end_date=activity.end_date,
-        days_of_week=activity.days_of_week,
-        day_of_month=activity.day_of_month,
-        notes=activity.notes,
-        mode=activity.mode,
-        responsible_ids=[u.id for u in activity.responsibles]
-    )
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        
+        return ActivityResponse(
+            id=activity.id,
+            title=activity.title,
+            start_date=activity.start_date,
+            time=activity.time,
+            category_id=activity.category_id,
+            repeat_mode=activity.repeat_mode,
+            end_date=activity.end_date,
+            days_of_week=activity.days_of_week,
+            day_of_month=activity.day_of_month,
+            notes=activity.notes,
+            mode=activity.mode,
+            responsible_ids=[u.id for u in activity.responsibles]
+        )
+    
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.put("/activities/{activity_id}")
 def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Session = Depends(get_db)):
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
 
-    update_data = activity_update.model_dump(exclude_unset=True)
-    
-    # Validar category_id si se está actualizando
-    if "category_id" in update_data:
-        category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
-        if not category:
-            raise HTTPException(status_code=404, detail="Category not found")
+        update_data = activity_update.model_dump(exclude_unset=True)
+        
+        # Additional validation for updated fields
+        if "title" in update_data and update_data["title"]:
+            if not update_data["title"].strip():
+                return SecureErrorResponse.validation_error("Activity title cannot be empty")
+            update_data["title"] = update_data["title"].strip()
+        
+        # Validate category_id if being updated
+        if "category_id" in update_data:
+            category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
+            if not category:
+                return SecureErrorResponse.not_found_error("Category not found")
+            
+            # Validate mode compatibility if mode is also being updated
+            new_mode = update_data.get("mode", activity.mode)
+            if new_mode not in [category.mode, CategoryMode.both]:
+                if category.mode != CategoryMode.both:
+                    return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
+        
+        # Validate start_date if being updated
+        if "start_date" in update_data:
+            if update_data["start_date"] < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+                return SecureErrorResponse.validation_error("Start date cannot be in the past")
+        
+        # Validate end_date logic if being updated
+        if "end_date" in update_data and update_data["end_date"]:
+            start_date = update_data.get("start_date", activity.start_date)
+            if update_data["end_date"] <= start_date:
+                return SecureErrorResponse.validation_error("End date must be after start date")
+        
+        # Validate repeat mode logic
+        if "repeat_mode" in update_data:
+            repeat_mode = update_data["repeat_mode"]
+            if repeat_mode == RepeatMode.weekly:
+                days_of_week = update_data.get("days_of_week", activity.days_of_week)
+                if not days_of_week or (isinstance(days_of_week, str) and not days_of_week.strip()):
+                    return SecureErrorResponse.validation_error("days_of_week is required for weekly repeat mode")
+            elif repeat_mode == RepeatMode.monthly:
+                day_of_month = update_data.get("day_of_month", activity.day_of_month)
+                if day_of_month is None:
+                    return SecureErrorResponse.validation_error("day_of_month is required for monthly repeat mode")
 
-    if "days_of_week" in update_data and update_data["days_of_week"] is not None:
-        update_data["days_of_week"] = ",".join(update_data["days_of_week"])
+        # Handle days_of_week conversion
+        if "days_of_week" in update_data and update_data["days_of_week"] is not None:
+            if isinstance(update_data["days_of_week"], list):
+                update_data["days_of_week"] = ",".join(update_data["days_of_week"])
 
-    for key, value in update_data.items():
-        if key == "responsible_ids":
-            if value:  # Solo validar si hay IDs
-                existing_users = db.query(User).filter(User.id.in_(value)).all()
-                if len(existing_users) != len(value):
-                    raise HTTPException(status_code=404, detail="One or more users not found")
+        # Sanitize notes if being updated
+        if "notes" in update_data and update_data["notes"]:
+            update_data["notes"] = update_data["notes"].strip()
+
+        # Handle responsible_ids separately
+        if "responsible_ids" in update_data:
+            responsible_ids = update_data.pop("responsible_ids")
+            if responsible_ids:
+                # Remove duplicates and validate
+                unique_ids = list(set(responsible_ids))
+                if len(unique_ids) != len(responsible_ids):
+                    return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
+                
+                existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
+                if len(existing_users) != len(unique_ids):
+                    missing_ids = set(unique_ids) - {user.id for user in existing_users}
+                    return SecureErrorResponse.not_found_error(f"Users not found: {list(missing_ids)}")
                 activity.responsibles = existing_users
             else:
                 activity.responsibles = []
-        else:
+
+        # Apply other updates
+        for key, value in update_data.items():
             setattr(activity, key, value)
 
-    db.commit()
-    db.refresh(activity)
-    return activity
+        db.commit()
+        db.refresh(activity)
+        return activity
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "update_activity", "activity_id": activity_id})
 
 @app.delete("/activities/{activity_id}")
 def delete_activity(activity_id: int, db: Session = Depends(get_db)):
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        
+        db.delete(activity)
+        db.commit()
+        
+        return {"detail": "Activity deleted successfully"}
     
-    db.delete(activity)
-    db.commit()
-    
-    return {"detail": "Activity deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "delete_activity", "activity_id": activity_id})
 
 # Endpoints para Activity Occurrences
 @app.get("/activity-occurrences")
@@ -538,164 +1213,315 @@ def get_all_activity_occurrences(db: Session = Depends(get_db)):
 @app.get("/activity-occurrences/{occurrence_id}")
 def get_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
     """Obtener una ocurrencia específica por ID"""
-    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
-    if not occurrence:
-        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    try:
+        # Validate occurrence_id
+        if occurrence_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid occurrence ID")
+        
+        occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+        if not occurrence:
+            return SecureErrorResponse.not_found_error("Activity occurrence not found")
+        
+        return ActivityOccurrenceResponse(
+            id=occurrence.id,
+            activity_id=occurrence.activity_id,
+            date=occurrence.date,
+            complete=occurrence.complete,
+            activity_title=occurrence.activity.title if occurrence.activity else None
+        )
     
-    return ActivityOccurrenceResponse(
-        id=occurrence.id,
-        activity_id=occurrence.activity_id,
-        date=occurrence.date,
-        complete=occurrence.complete,
-        activity_title=occurrence.activity.title if occurrence.activity else None
-    )
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.post("/activity-occurrences")
 def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session = Depends(get_db)):
     """Crear una nueva ocurrencia de actividad"""
-    # Verificar que la actividad existe
-    activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Verify activity exists
+        activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        
+        # Additional validation for occurrence date
+        if occurrence.date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+            return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
+        
+        # Check for duplicate occurrence (same activity and date)
+        existing_occurrence = db.query(ActivityOccurrence).filter(
+            ActivityOccurrence.activity_id == occurrence.activity_id,
+            ActivityOccurrence.date == occurrence.date
+        ).first()
+        if existing_occurrence:
+            return SecureErrorResponse.conflict_error("An occurrence for this activity and date already exists")
+        
+        db_occurrence = ActivityOccurrence(
+            activity_id=occurrence.activity_id,
+            date=occurrence.date,
+            complete=occurrence.complete
+        )
+        db.add(db_occurrence)
+        db.commit()
+        db.refresh(db_occurrence)
+        
+        return ActivityOccurrenceResponse(
+            id=db_occurrence.id,
+            activity_id=db_occurrence.activity_id,
+            date=db_occurrence.date,
+            complete=db_occurrence.complete,
+            activity_title=db_occurrence.activity.title if db_occurrence.activity else None
+        )
     
-    db_occurrence = ActivityOccurrence(
-        activity_id=occurrence.activity_id,
-        date=occurrence.date,
-        complete=occurrence.complete
-    )
-    db.add(db_occurrence)
-    db.commit()
-    db.refresh(db_occurrence)
-    
-    return ActivityOccurrenceResponse(
-        id=db_occurrence.id,
-        activity_id=db_occurrence.activity_id,
-        date=db_occurrence.date,
-        complete=db_occurrence.complete,
-        activity_title=db_occurrence.activity.title if db_occurrence.activity else None
-    )
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "create_activity_occurrence"})
 
 @app.put("/activity-occurrences/{occurrence_id}")
 def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db)):
     """Actualizar una ocurrencia de actividad"""
-    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
-    if not occurrence:
-        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    try:
+        # Validate occurrence_id
+        if occurrence_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid occurrence ID")
+        
+        occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+        if not occurrence:
+            return SecureErrorResponse.not_found_error("Activity occurrence not found")
+        
+        update_data = occurrence_update.model_dump(exclude_unset=True)
+        
+        # Additional validation for date if being updated
+        if "date" in update_data:
+            new_date = update_data["date"]
+            if new_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+                return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
+            
+            # Check for duplicate occurrence with new date
+            if new_date != occurrence.date:
+                existing_occurrence = db.query(ActivityOccurrence).filter(
+                    ActivityOccurrence.activity_id == occurrence.activity_id,
+                    ActivityOccurrence.date == new_date,
+                    ActivityOccurrence.id != occurrence_id
+                ).first()
+                if existing_occurrence:
+                    return SecureErrorResponse.conflict_error("An occurrence for this activity and date already exists")
+        
+        for key, value in update_data.items():
+            setattr(occurrence, key, value)
+        
+        db.commit()
+        db.refresh(occurrence)
+        
+        return ActivityOccurrenceResponse(
+            id=occurrence.id,
+            activity_id=occurrence.activity_id,
+            date=occurrence.date,
+            complete=occurrence.complete,
+            activity_title=occurrence.activity.title if occurrence.activity else None
+        )
     
-    update_data = occurrence_update.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(occurrence, key, value)
-    
-    db.commit()
-    db.refresh(occurrence)
-    
-    return ActivityOccurrenceResponse(
-        id=occurrence.id,
-        activity_id=occurrence.activity_id,
-        date=occurrence.date,
-        complete=occurrence.complete,
-        activity_title=occurrence.activity.title if occurrence.activity else None
-    )
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "update_activity_occurrence", "occurrence_id": occurrence_id})
 
 @app.delete("/activity-occurrences/{occurrence_id}")
 def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
     """Eliminar una ocurrencia de actividad"""
-    occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
-    if not occurrence:
-        raise HTTPException(status_code=404, detail="Activity occurrence not found")
+    try:
+        # Validate occurrence_id
+        if occurrence_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid occurrence ID")
+        
+        occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+        if not occurrence:
+            return SecureErrorResponse.not_found_error("Activity occurrence not found")
+        
+        db.delete(occurrence)
+        db.commit()
+        return {"detail": "Activity occurrence deleted successfully"}
     
-    db.delete(occurrence)
-    db.commit()
-    return {"detail": "Activity occurrence deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "delete_activity_occurrence", "occurrence_id": occurrence_id})
 
 @app.get("/activities/{activity_id}/occurrences")
 def get_activity_occurrences(activity_id: int, db: Session = Depends(get_db)):
     """Obtener todas las ocurrencias de una actividad específica"""
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        
+        occurrences = db.query(ActivityOccurrence).filter(ActivityOccurrence.activity_id == activity_id).all()
+        return [
+            ActivityOccurrenceResponse(
+                id=occ.id,
+                activity_id=occ.activity_id,
+                date=occ.date,
+                complete=occ.complete,
+                activity_title=activity.title
+            )
+            for occ in occurrences
+        ]
     
-    occurrences = db.query(ActivityOccurrence).filter(ActivityOccurrence.activity_id == activity_id).all()
-    return [
-        ActivityOccurrenceResponse(
-            id=occ.id,
-            activity_id=occ.activity_id,
-            date=occ.date,
-            complete=occ.complete,
-            activity_title=activity.title
-        )
-        for occ in occurrences
-    ]
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.get("/activity-occurrences/by-date/{date}")
 def get_occurrences_by_date(date: str, db: Session = Depends(get_db)):
     """Obtener todas las ocurrencias para una fecha específica (formato: YYYY-MM-DD)"""
     try:
-        target_date = datetime.strptime(date, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        # Validate and sanitize date parameter
+        date_str = sanitize_string(date, 10)  # YYYY-MM-DD format
+        
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return SecureErrorResponse.validation_error("Invalid date format. Use YYYY-MM-DD")
+        
+        # Validate date is not too far in the past or future (reasonable limits)
+        from datetime import timedelta
+        min_date = datetime.now().date() - timedelta(days=365 * 2)  # 2 years ago
+        max_date = datetime.now().date() + timedelta(days=365 * 2)  # 2 years from now
+        
+        if target_date < min_date:
+            return SecureErrorResponse.validation_error("Date is too far in the past")
+        if target_date > max_date:
+            return SecureErrorResponse.validation_error("Date is too far in the future")
+        
+        occurrences = db.query(ActivityOccurrence).filter(
+            ActivityOccurrence.date >= datetime.combine(target_date, datetime.min.time()),
+            ActivityOccurrence.date < datetime.combine(target_date, datetime.max.time())
+        ).all()
+        
+        return [
+            ActivityOccurrenceResponse(
+                id=occ.id,
+                activity_id=occ.activity_id,
+                date=occ.date,
+                complete=occ.complete,
+                activity_title=occ.activity.title if occ.activity else None
+            )
+            for occ in occurrences
+        ]
     
-    occurrences = db.query(ActivityOccurrence).filter(
-        ActivityOccurrence.date >= datetime.combine(target_date, datetime.min.time()),
-        ActivityOccurrence.date < datetime.combine(target_date, datetime.max.time())
-    ).all()
-    
-    return [
-        ActivityOccurrenceResponse(
-            id=occ.id,
-            activity_id=occ.activity_id,
-            date=occ.date,
-            complete=occ.complete,
-            activity_title=occ.activity.title if occ.activity else None
-        )
-        for occ in occurrences
-    ]
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.get("/activities/{activity_id}/todos")
 def get_activity_todos(activity_id: int, db: Session = Depends(get_db)):
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    return activity.todos
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        return activity.todos
+    
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.post("/activities/{activity_id}/todos")
 def add_todo_to_activity(activity_id: int, todo: TodoCreate, db: Session = Depends(get_db)):
-    activity = db.query(Activity).filter(Activity.id == activity_id).first()
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    db_todo = Todo(text=todo.text, complete=todo.complete, activity_id=activity_id)
-    db.add(db_todo)
-    db.commit()
-    db.refresh(db_todo)
-    return db_todo
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        
+        # Additional validation
+        if not todo.text.strip():
+            return SecureErrorResponse.validation_error("Todo text cannot be empty")
+        
+        # Check for reasonable limit of todos per activity
+        current_todo_count = db.query(Todo).filter(Todo.activity_id == activity_id).count()
+        if current_todo_count >= 50:
+            return SecureErrorResponse.validation_error("Maximum number of todos per activity reached (50)")
+        
+        db_todo = Todo(
+            text=todo.text.strip(), 
+            complete=todo.complete, 
+            activity_id=activity_id
+        )
+        db.add(db_todo)
+        db.commit()
+        db.refresh(db_todo)
+        return db_todo
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "add_todo_to_activity", "activity_id": activity_id})
 
 @app.get("/todos/{todo_id}")
 def get_todo(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(Todo).filter(Todo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    return todo
+    try:
+        # Validate todo_id
+        if todo_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid todo ID")
+        
+        todo = db.query(Todo).filter(Todo.id == todo_id).first()
+        if not todo:
+            return SecureErrorResponse.not_found_error("Todo not found")
+        return todo
+    
+    except Exception as e:
+        return handle_generic_exception(e)
 
 @app.put("/todos/{todo_id}")
 def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get_db)):
-    todo = db.query(Todo).filter(Todo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    update_data = todo_update.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(todo, key, value)
-    db.commit()
-    db.refresh(todo)
-    return todo
+    try:
+        # Validate todo_id
+        if todo_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid todo ID")
+        
+        todo = db.query(Todo).filter(Todo.id == todo_id).first()
+        if not todo:
+            return SecureErrorResponse.not_found_error("Todo not found")
+        
+        update_data = todo_update.model_dump(exclude_unset=True)
+        
+        # Additional validation for text if being updated
+        if "text" in update_data:
+            if not update_data["text"].strip():
+                return SecureErrorResponse.validation_error("Todo text cannot be empty")
+            update_data["text"] = update_data["text"].strip()
+        
+        for key, value in update_data.items():
+            setattr(todo, key, value)
+        db.commit()
+        db.refresh(todo)
+        return todo
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "update_todo", "todo_id": todo_id})
 
 @app.delete("/todos/{todo_id}")
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(Todo).filter(Todo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    db.delete(todo)
-    db.commit()
-    return {"detail": "Todo deleted successfully"}
+    try:
+        # Validate todo_id
+        if todo_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid todo ID")
+        
+        todo = db.query(Todo).filter(Todo.id == todo_id).first()
+        if not todo:
+            return SecureErrorResponse.not_found_error("Todo not found")
+        
+        db.delete(todo)
+        db.commit()
+        return {"detail": "Todo deleted successfully"}
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "delete_todo", "todo_id": todo_id})
 
 @app.get("/history")
 def get_history(db: Session = Depends(get_db)):
@@ -703,15 +1529,101 @@ def get_history(db: Session = Depends(get_db)):
 
 @app.post("/history")
 def create_history(history: HistoryCreate, db: Session = Depends(get_db)):
-    # Verifica que el usuario existe
-    user = db.query(User).filter(User.id == history.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db_history = History(action=history.action, user_id=history.user_id)
-    db.add(db_history)
-    db.commit()
-    db.refresh(db_history)
-    return db_history
+    try:
+        # Verify user exists
+        user = db.query(User).filter(User.id == history.user_id).first()
+        if not user:
+            return SecureErrorResponse.not_found_error("User not found")
+        
+        # Additional validation
+        if not history.action.strip():
+            return SecureErrorResponse.validation_error("Action cannot be empty")
+        
+        db_history = History(
+            action=history.action.strip(), 
+            user_id=history.user_id
+        )
+        db.add(db_history)
+        db.commit()
+        db.refresh(db_history)
+        return db_history
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e, additional_context={"operation": "create_history"})
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+    """Handle SQLAlchemy database errors securely"""
+    error_id = SecureErrorResponse.generate_error_id()
+    
+    # Log detailed error information server-side
+    SecureErrorResponse.log_detailed_error(
+        error_id=error_id,
+        error=exc,
+        request=request,
+        additional_context={"error_category": "database", "error_type": type(exc).__name__}
+    )
+    
+    # Return generic database error response
+    if isinstance(exc, IntegrityError):
+        if "UNIQUE constraint failed" in str(exc):
+            return SecureErrorResponse.conflict_error("Resource already exists", error_id)
+        elif "FOREIGN KEY constraint failed" in str(exc):
+            return SecureErrorResponse.validation_error("Invalid reference data", error_id)
+        else:
+            return SecureErrorResponse.database_error("Data integrity error", error_id)
+    
+    return SecureErrorResponse.database_error("Database operation failed", error_id)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions with sanitized messages"""
+    error_id = SecureErrorResponse.generate_error_id()
+    
+    # Log HTTP exceptions for monitoring
+    SecureErrorResponse.log_detailed_error(
+        error_id=error_id,
+        error=exc,
+        request=request,
+        additional_context={
+            "error_category": "http_exception",
+            "status_code": exc.status_code,
+            "original_detail": exc.detail
+        }
+    )
+    
+    # Sanitize the error message
+    sanitized_detail = sanitize_error_message(str(exc.detail))
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": sanitized_detail,
+            "error_id": error_id
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Handle all other unexpected exceptions"""
+    error_id = SecureErrorResponse.generate_error_id()
+    
+    # Log detailed error information server-side
+    SecureErrorResponse.log_detailed_error(
+        error_id=error_id,
+        error=exc,
+        request=request,
+        additional_context={"error_category": "unexpected", "error_type": type(exc).__name__}
+    )
+    
+    # Return generic internal server error
+    return SecureErrorResponse.internal_server_error(
+        "An internal server error occurred. Please contact support if the problem persists.",
+        error_id
+    )
 
 if __name__ == "__main__":
     import uvicorn

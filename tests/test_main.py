@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from main import app, Base, db_engine, SessionLocal, get_password_hash
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 from main import User
 from main import Category, CategoryMode
 from main import ActivityOccurrence
@@ -22,7 +22,7 @@ def setup_and_teardown_db():
     # Drop all tables after each test
     Base.metadata.drop_all(bind=db_engine)
 
-def create_user_helper(username="testuser", password="testpass", is_admin=False):
+def create_user_helper(username="testuser", password="TestPass123!", is_admin=False):
     db: Session = SessionLocal()
     user = User(
         name="Test User",
@@ -54,7 +54,7 @@ def create_activity_helper(category_id, responsible_ids=None):
         responsible_ids = []
     payload = {
         "title": "Test Activity",
-        "start_date": datetime.utcnow().isoformat(),
+        "start_date": datetime.now(timezone.utc).isoformat(),
         "time": "12:00",
         "category_id": category_id,
         "repeat_mode": "none",
@@ -69,14 +69,14 @@ def create_activity_helper(category_id, responsible_ids=None):
     response = client.post("/activities", json=payload)
     return response
 
-def get_token(username="testuser", password="testpass"):
+def get_token(username="testuser", password="TestPass123!"):
     response = client.post("/token", data={"username": username, "password": password})
     return response.json().get("access_token")
 
 # --- /token ---
 def test_login_success():
     create_user_helper()
-    response = client.post("/token", data={"username": "testuser", "password": "testpass"})
+    response = client.post("/token", data={"username": "testuser", "password": "TestPass123!"})
     assert response.status_code == 200
     assert "access_token" in response.json()
 
@@ -92,7 +92,7 @@ def test_login_failure_no_user():
 # --- /users ---
 def test_create_user_success():
     response = client.post("/users", json={
-        "name": "User1", "username": "user1", "password": "pass", "is_admin": False
+        "name": "User1", "username": "user1", "password": "Password123!", "is_admin": False
     })
     assert response.status_code == 200
     assert response.json()["username"] == "user1"
@@ -100,7 +100,7 @@ def test_create_user_success():
 def test_create_user_duplicate_username():
     create_user_helper(username="user2")
     response = client.post("/users", json={
-        "name": "User2", "username": "user2", "password": "pass", "is_admin": False
+        "name": "User2", "username": "user2", "password": "Password123!", "is_admin": False
     })
     assert response.status_code == 400
 
@@ -138,22 +138,22 @@ def test_update_user_not_found():
     assert response.status_code == 404
 
 def test_change_password_success():
-    user = create_user_helper(username="user8", password="oldpass")
+    user = create_user_helper(username="user8", password="OldPass123!")
     response = client.post(f"/users/{user.id}/change-password", json={
-        "old_password": "oldpass", "new_password": "newpass"
+        "old_password": "OldPass123!", "new_password": "NewPass456@"
     })
     assert response.status_code == 200
 
 def test_change_password_wrong_old():
-    user = create_user_helper(username="user9", password="oldpass")
+    user = create_user_helper(username="user9", password="OldPass123!")
     response = client.post(f"/users/{user.id}/change-password", json={
-        "old_password": "wrong", "new_password": "newpass"
+        "old_password": "WrongPass123!", "new_password": "NewPass456@"
     })
     assert response.status_code == 400
 
 def test_change_password_user_not_found():
     response = client.post("/users/999/change-password", json={
-        "old_password": "x", "new_password": "y"
+        "old_password": "OldPass123!", "new_password": "NewPass456@"
     })
     assert response.status_code == 404
 
@@ -292,7 +292,7 @@ def test_complete_occurrence_success():
     resp = create_activity_helper(category_id=cat.id)
     activity_id = resp.json()["id"]
     db: Session = SessionLocal()
-    occ = ActivityOccurrence(activity_id=activity_id, date=datetime.utcnow())
+    occ = ActivityOccurrence(activity_id=activity_id, date=datetime.now(timezone.utc))
     db.add(occ)
     db.commit()
     db.refresh(occ)

@@ -7,3 +7,5 @@ httpx
 python-multipart
 passlib[bcrypt]
 pydantic
+bleach
+email-validator

@@ -19,7 +19,7 @@ def client():
 def test_full_user_category_activity_flow(client):
     # Crear usuario
     resp_user = client.post("/users", json={
-        "name": "Iñigo", "username": "inigo", "password": "pass123", "is_admin": False
+        "name": "Iñigo", "username": "inigo", "password": "Password123!", "is_admin": False
     })
     assert resp_user.status_code == 200
     user_id = resp_user.json()["id"]
@@ -67,7 +67,7 @@ def test_full_user_category_activity_flow(client):
 def test_todo_and_history_flow(client):
     # Crear usuario y categoría
     resp_user = client.post("/users", json={
-        "name": "Lola", "username": "lola", "password": "pass456", "is_admin": False
+        "name": "Lola", "username": "lola", "password": "Password456!", "is_admin": False
     })
     user_id = resp_user.json()["id"]
     resp_cat = client.post("/categories", json={
