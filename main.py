@@ -4,7 +4,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 from typing import List, Optional
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from enum import Enum
 import re
 import html
@@ -713,7 +713,7 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     except Exception as e:
         # Rollback transaction on error
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "create_user"})
+        return handle_database_error(e)
 
 
 @app.put("/users/{user_id}")
@@ -761,7 +761,7 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "update_user", "user_id": user_id})
+        return handle_database_error(e)
 
 @app.post("/users/{user_id}/change-password")
 def change_password(
@@ -798,7 +798,7 @@ def change_password(
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "change_password", "user_id": user_id})
+        return handle_database_error(e)
 
 
 @app.delete("/users/{user_id}")
@@ -823,7 +823,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "delete_user", "user_id": user_id})
+        return handle_database_error(e)
 
 @app.post("/categories")
 def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
@@ -848,7 +848,7 @@ def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "create_category"})
+        return handle_database_error(e)
 
 @app.get("/categories")
 def get_categories(db: Session = Depends(get_db)):
@@ -904,7 +904,7 @@ def update_category(category_id: int, category_update: CategoryUpdate, db: Sessi
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "update_category", "category_id": category_id})
+        return handle_database_error(e)
 
 @app.delete("/categories/{category_id}")
 def delete_category(category_id: int, db: Session = Depends(get_db)):
@@ -928,7 +928,7 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "delete_category", "category_id": category_id})
+        return handle_database_error(e)
 
 @app.get("/activities", response_model=List[ActivityResponse])
 def get_activities(db: Session = Depends(get_db)):
@@ -960,7 +960,7 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
             return SecureErrorResponse.validation_error("Activity title cannot be empty")
         
         # Validate start_date is not too far in the past (allow some flexibility for scheduling)
-        if activity.start_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+        if activity.start_date < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
             return SecureErrorResponse.validation_error("Start date cannot be in the past")
         
         # Verify category exists and is valid
@@ -1051,7 +1051,7 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "create_activity"})
+        return handle_database_error(e)
 
 @app.get("/activities/{activity_id}", response_model=ActivityResponse)
 def get_activity(activity_id: int, db: Session = Depends(get_db)):
@@ -1172,7 +1172,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "update_activity", "activity_id": activity_id})
+        return handle_database_error(e)
 
 @app.delete("/activities/{activity_id}")
 def delete_activity(activity_id: int, db: Session = Depends(get_db)):
@@ -1192,7 +1192,7 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "delete_activity", "activity_id": activity_id})
+        return handle_database_error(e)
 
 # Endpoints para Activity Occurrences
 @app.get("/activity-occurrences")
@@ -1273,7 +1273,7 @@ def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "create_activity_occurrence"})
+        return handle_database_error(e)
 
 @app.put("/activity-occurrences/{occurrence_id}")
 def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db)):
@@ -1321,7 +1321,7 @@ def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOc
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "update_activity_occurrence", "occurrence_id": occurrence_id})
+        return handle_database_error(e)
 
 @app.delete("/activity-occurrences/{occurrence_id}")
 def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
@@ -1341,7 +1341,36 @@ def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "delete_activity_occurrence", "occurrence_id": occurrence_id})
+        return handle_database_error(e)
+
+@app.put("/activity-occurrences/{occurrence_id}/complete")
+def complete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+    """Mark an activity occurrence as complete"""
+    try:
+        # Validate occurrence_id
+        if occurrence_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid occurrence ID")
+        
+        occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
+        if not occurrence:
+            return SecureErrorResponse.not_found_error("Activity occurrence not found")
+        
+        # Mark as complete
+        occurrence.complete = True
+        db.commit()
+        db.refresh(occurrence)
+        
+        return ActivityOccurrenceResponse(
+            id=occurrence.id,
+            activity_id=occurrence.activity_id,
+            date=occurrence.date,
+            complete=occurrence.complete,
+            activity_title=occurrence.activity.title if occurrence.activity else None
+        )
+    
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e)
 
 @app.get("/activities/{activity_id}/occurrences")
 def get_activity_occurrences(activity_id: int, db: Session = Depends(get_db)):
@@ -1458,7 +1487,7 @@ def add_todo_to_activity(activity_id: int, todo: TodoCreate, db: Session = Depen
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "add_todo_to_activity", "activity_id": activity_id})
+        return handle_database_error(e)
 
 @app.get("/todos/{todo_id}")
 def get_todo(todo_id: int, db: Session = Depends(get_db)):
@@ -1502,7 +1531,7 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "update_todo", "todo_id": todo_id})
+        return handle_database_error(e)
 
 @app.delete("/todos/{todo_id}")
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
@@ -1521,7 +1550,7 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "delete_todo", "todo_id": todo_id})
+        return handle_database_error(e)
 
 @app.get("/history")
 def get_history(db: Session = Depends(get_db)):
@@ -1550,7 +1579,7 @@ def create_history(history: HistoryCreate, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        return handle_database_error(e, additional_context={"operation": "create_history"})
+        return handle_database_error(e)
 
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):

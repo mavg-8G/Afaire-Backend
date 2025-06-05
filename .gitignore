@@ -1,3 +1,7 @@
 todo_app.db
-__pycache__/
-.pytest_cache/
+__pycache__
+__pycache__/*
+.pytest_cache
+.pytest_cache/*
+*.log
+app_errors.log
