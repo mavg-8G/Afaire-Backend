@@ -94,6 +94,14 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # Dependency to get the current user from the JWT token
 
 def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
