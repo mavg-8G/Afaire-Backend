@@ -5,7 +5,7 @@ import re
 import html
 import bleach
 from typing import Optional, List, Any
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from pydantic import validator, ValidationError
 
 
@@ -191,27 +191,32 @@ def validate_day_of_month(value: int) -> int:
 
 
 def validate_datetime_not_past(value: datetime, field_name: str = "datetime") -> datetime:
-    """Validate that datetime is not in the past"""
+    """Validate that datetime is not in the past (UTC-aware)"""
     if not isinstance(value, datetime):
         raise ValueError(f"{field_name} must be a datetime object")
-    
-    if value < datetime.now():
+
+    # Convert naive datetimes to UTC-aware (assume UTC if naive)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    if value < now_utc:
         raise ValueError(f"{field_name} cannot be in the past")
-    
     return value
 
 
 def validate_end_date_after_start(start_date: datetime, end_date: Optional[datetime]) -> Optional[datetime]:
-    """Validate that end date is after start date"""
+    """Validate that end date is after start date (UTC-aware)"""
     if end_date is None:
         return end_date
-    
     if not isinstance(end_date, datetime):
         raise ValueError("End date must be a datetime object")
-    
+    # Convert naive datetimes to UTC-aware (assume UTC if naive)
+    if start_date.tzinfo is None:
+        start_date = start_date.replace(tzinfo=timezone.utc)
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
     if end_date <= start_date:
         raise ValueError("End date must be after start date")
-    
     return end_date
 
 

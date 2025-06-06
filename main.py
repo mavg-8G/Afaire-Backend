@@ -1000,7 +1000,11 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
             return SecureErrorResponse.validation_error("Activity title cannot be empty")
         
         # Validate start_date is not too far in the past (allow some flexibility for scheduling)
-        if activity.start_date < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
+        if activity.start_date.tzinfo is None:
+            activity_start_utc = activity.start_date.replace(tzinfo=timezone.utc)
+        else:
+            activity_start_utc = activity.start_date.astimezone(timezone.utc)
+        if activity_start_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
             return SecureErrorResponse.validation_error("Start date cannot be in the past")
         
         # Verify category exists and is valid
@@ -1016,11 +1020,9 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         # Verify all responsible users exist
         existing_users = []
         if activity.responsible_ids:
-            # Remove duplicates and validate
             unique_ids = list(set(activity.responsible_ids))
             if len(unique_ids) != len(activity.responsible_ids):
                 return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
-            
             existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
             if len(existing_users) != len(unique_ids):
                 missing_ids = set(unique_ids) - {user.id for user in existing_users}
@@ -1038,7 +1040,12 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         
         # Validate end_date logic
         if activity.end_date:
-            if activity.end_date <= activity.start_date:
+            # Always compare in UTC
+            if activity.end_date.tzinfo is None:
+                end_date_utc = activity.end_date.replace(tzinfo=timezone.utc)
+            else:
+                end_date_utc = activity.end_date.astimezone(timezone.utc)
+            if end_date_utc <= activity_start_utc:
                 return SecureErrorResponse.validation_error("End date must be after start date")
             if activity.repeat_mode == RepeatMode.none:
                 return SecureErrorResponse.validation_error("End date is only valid for repeating activities")
@@ -1128,46 +1135,51 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
         # Validate activity_id
         if activity_id <= 0:
             return SecureErrorResponse.validation_error("Invalid activity ID")
-        
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
-
         # Authorization: Only responsible users or admins can update
         if current_user not in activity.responsibles and not current_user.is_admin:
             return SecureErrorResponse.authorization_error("Not authorized to update this activity")
-
         update_data = activity_update.model_dump(exclude_unset=True)
-        
         # Additional validation for updated fields
         if "title" in update_data and update_data["title"]:
             if not update_data["title"].strip():
                 return SecureErrorResponse.validation_error("Activity title cannot be empty")
             update_data["title"] = update_data["title"].strip()
-        
         # Validate category_id if being updated
         if "category_id" in update_data:
             category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
             if not category:
                 return SecureErrorResponse.not_found_error("Category not found")
-            
-            # Validate mode compatibility if mode is also being updated
             new_mode = update_data.get("mode", activity.mode)
             if new_mode not in [category.mode, CategoryMode.both]:
                 if category.mode != CategoryMode.both:
                     return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
-        
         # Validate start_date if being updated
         if "start_date" in update_data:
-            if update_data["start_date"] < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+            start_date = update_data["start_date"]
+            if start_date.tzinfo is None:
+                start_date_utc = start_date.replace(tzinfo=timezone.utc)
+            else:
+                start_date_utc = start_date.astimezone(timezone.utc)
+            if start_date_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
                 return SecureErrorResponse.validation_error("Start date cannot be in the past")
-        
+        else:
+            start_date_utc = activity.start_date
+            if start_date_utc.tzinfo is None:
+                start_date_utc = start_date_utc.replace(tzinfo=timezone.utc)
+            else:
+                start_date_utc = start_date_utc.astimezone(timezone.utc)
         # Validate end_date logic if being updated
         if "end_date" in update_data and update_data["end_date"]:
-            start_date = update_data.get("start_date", activity.start_date)
-            if update_data["end_date"] <= start_date:
+            end_date = update_data["end_date"]
+            if end_date.tzinfo is None:
+                end_date_utc = end_date.replace(tzinfo=timezone.utc)
+            else:
+                end_date_utc = end_date.astimezone(timezone.utc)
+            if end_date_utc <= start_date_utc:
                 return SecureErrorResponse.validation_error("End date must be after start date")
-        
         # Validate repeat mode logic
         if "repeat_mode" in update_data:
             repeat_mode = update_data["repeat_mode"]
@@ -1179,25 +1191,20 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 day_of_month = update_data.get("day_of_month", activity.day_of_month)
                 if day_of_month is None:
                     return SecureErrorResponse.validation_error("day_of_month is required for monthly repeat mode")
-
         # Handle days_of_week conversion
         if "days_of_week" in update_data and update_data["days_of_week"] is not None:
             if isinstance(update_data["days_of_week"], list):
                 update_data["days_of_week"] = ",".join(update_data["days_of_week"])
-
         # Sanitize notes if being updated
         if "notes" in update_data and update_data["notes"]:
             update_data["notes"] = update_data["notes"].strip()
-
         # Handle responsible_ids separately
         if "responsible_ids" in update_data:
             responsible_ids = update_data.pop("responsible_ids")
             if responsible_ids:
-                # Remove duplicates and validate
                 unique_ids = list(set(responsible_ids))
                 if len(unique_ids) != len(responsible_ids):
                     return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
-                
                 existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
                 if len(existing_users) != len(unique_ids):
                     missing_ids = set(unique_ids) - {user.id for user in existing_users}
@@ -1205,39 +1212,48 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 activity.responsibles = existing_users
             else:
                 activity.responsibles = []
-
         # Apply other updates
         for key, value in update_data.items():
             setattr(activity, key, value)
-
         db.commit()
         db.refresh(activity)
         return activity
-    
     except Exception as e:
         db.rollback()
         return handle_database_error(e)
 
-@app.delete("/activities/{activity_id}")
-def delete_activity(activity_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@app.post("/activity-occurrences")
+def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session = Depends(get_db)):
+    """Crear una nueva ocurrencia de actividad"""
     try:
-        # Validate activity_id
-        if activity_id <= 0:
-            return SecureErrorResponse.validation_error("Invalid activity ID")
-        
-        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        # Verify activity exists
+        activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
-
-        # Authorization: Only responsible users or admins can delete
-        if current_user not in activity.responsibles and not current_user.is_admin:
-            return SecureErrorResponse.authorization_error("Not authorized to delete this activity")
-
-        db.delete(activity)
+        # Additional validation for occurrence date
+        occ_date = occurrence.date
+        if occ_date.tzinfo is None:
+            occ_date_utc = occ_date.replace(tzinfo=timezone.utc)
+        else:
+            occ_date_utc = occ_date.astimezone(timezone.utc)
+        if occ_date_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
+            return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
+        # Check for duplicate occurrence (same activity and date)
+        existing_occurrence = db.query(ActivityOccurrence).filter(
+            ActivityOccurrence.activity_id == occurrence.activity_id,
+            ActivityOccurrence.date == occurrence.date
+        ).first()
+        if existing_occurrence:
+            return SecureErrorResponse.conflict_error("An occurrence for this activity and date already exists")
+        db_occurrence = ActivityOccurrence(
+            activity_id=occurrence.activity_id,
+            date=occurrence.date,
+            complete=occurrence.complete
+        )
+        db.add(db_occurrence)
         db.commit()
-        
-        return {"detail": "Activity deleted successfully"}
-    
+        db.refresh(db_occurrence)
+        return db_occurrence
     except Exception as e:
         db.rollback()
         return handle_database_error(e)
@@ -1280,48 +1296,6 @@ def get_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         return handle_generic_exception(e)
-
-@app.post("/activity-occurrences")
-def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session = Depends(get_db)):
-    """Crear una nueva ocurrencia de actividad"""
-    try:
-        # Verify activity exists
-        activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
-        if not activity:
-            return SecureErrorResponse.not_found_error("Activity not found")
-        
-        # Additional validation for occurrence date
-        if occurrence.date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
-            return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
-        
-        # Check for duplicate occurrence (same activity and date)
-        existing_occurrence = db.query(ActivityOccurrence).filter(
-            ActivityOccurrence.activity_id == occurrence.activity_id,
-            ActivityOccurrence.date == occurrence.date
-        ).first()
-        if existing_occurrence:
-            return SecureErrorResponse.conflict_error("An occurrence for this activity and date already exists")
-        
-        db_occurrence = ActivityOccurrence(
-            activity_id=occurrence.activity_id,
-            date=occurrence.date,
-            complete=occurrence.complete
-        )
-        db.add(db_occurrence)
-        db.commit()
-        db.refresh(db_occurrence)
-        
-        return ActivityOccurrenceResponse(
-            id=db_occurrence.id,
-            activity_id=db_occurrence.activity_id,
-            date=db_occurrence.date,
-            complete=db_occurrence.complete,
-            activity_title=db_occurrence.activity.title if db_occurrence.activity else None
-        )
-    
-    except Exception as e:
-        db.rollback()
-        return handle_database_error(e)
 
 @app.put("/activity-occurrences/{occurrence_id}")
 def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
