@@ -639,7 +639,7 @@ def record_history(db: Session, user_id: int, action: str):
 
 # Routes
 @app.post("/token")
-# @limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
+@limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     try:
         # Sanitize input
@@ -734,7 +734,7 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.post("/users")
-#@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
+@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
 def create_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     try:
         # Additional server-side validation
@@ -821,7 +821,7 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         return handle_database_error(e)
 
 @app.post("/users/{user_id}/change-password")
-#@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
+@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
 def change_password(request: Request, user_id: int, req: ChangePasswordRequest, db: Session = Depends(get_db)):
     try:
         # Validate user_id
