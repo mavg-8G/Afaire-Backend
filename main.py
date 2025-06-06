@@ -10,7 +10,7 @@ import re
 import html
 import bleach
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from passlib.context import CryptContext
@@ -194,6 +194,16 @@ class History(Base):
     action = Column(String, nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User")
+
+class RefreshToken(Base):
+    __tablename__ = 'refresh_tokens'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    revoked = Column(Boolean, default=False)
+    user = relationship('User')
+    __table_args__ = (UniqueConstraint('user_id', 'token', name='_user_token_uc'),)
 
 Base.metadata.create_all(bind=db_engine)
 # Seed default admin user for tests
@@ -667,10 +677,12 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         
         if not password_valid:
             return SecureErrorResponse.authentication_error("Invalid credentials")
-        
         try:
             access_token = create_access_token(data={"sub": str(user.id)})
             refresh_token = create_refresh_token(data={"sub": str(user.id)})
+            # Store refresh token in DB
+            db.add(RefreshToken(user_id=user.id, token=refresh_token))
+            db.commit()
             response = {
                 "access_token": access_token,
                 "refresh_token": refresh_token,
@@ -688,7 +700,6 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
                 additional_context={"operation": "token_creation", "user_id": user.id}
             )
             return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
-    
     except Exception as e:
         # Log detailed error and return generic response
         error_id = SecureErrorResponse.generate_error_id()
@@ -705,12 +716,31 @@ def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_db)):
     """Exchange a valid refresh token for a new access token."""
     try:
         user_id = verify_refresh_token(refresh_token)
+        token_obj = db.query(RefreshToken).filter_by(token=refresh_token, revoked=False).first()
+        if not token_obj or str(token_obj.user_id) != str(user_id):
+            return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
         user = db.query(User).filter(User.id == int(user_id)).first()
         if not user:
             return SecureErrorResponse.authentication_error("User not found")
         new_access_token = create_access_token(data={"sub": str(user.id)})
         return {"access_token": new_access_token, "token_type": "bearer"}
     except Exception as e:
+        return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
+
+
+@app.post("/logout")
+def logout(refresh_token: str, db: Session = Depends(get_db)):
+    """Invalidate a refresh token (logout)."""
+    try:
+        user_id = verify_refresh_token(refresh_token)
+        token_obj = db.query(RefreshToken).filter_by(token=refresh_token, revoked=False).first()
+        if not token_obj or str(token_obj.user_id) != str(user_id):
+            return SecureErrorResponse.authentication_error("Invalid refresh token")
+        token_obj.revoked = True
+        db.commit()
+        return {"detail": "Logged out successfully"}
+    except Exception as e:
+        db.rollback()
         return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
 
 
@@ -847,6 +877,8 @@ def change_password(request: Request, user_id: int, req: ChangePasswordRequest, 
             return SecureErrorResponse.validation_error(str(e))
         
         user.hashed_password = get_password_hash(req.new_password)
+        # Invalidate all refresh tokens for this user
+        db.query(RefreshToken).filter_by(user_id=user_id, revoked=False).update({"revoked": True})
         db.commit()
         return {"detail": "Password updated successfully"}
     

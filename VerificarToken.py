@@ -7,7 +7,7 @@ from jose import JWTError, jwt
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 90  # Short-lived access token (90 minutes)
-REFRESH_TOKEN_EXPIRE_DAYS = 30    # Refresh token valid for 30 days
+REFRESH_TOKEN_EXPIRE_DAYS = 7    # Refresh token valid for 7 days
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()

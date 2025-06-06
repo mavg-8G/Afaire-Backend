@@ -10,3 +10,4 @@ pydantic
 bleach
 email-validator
 slowapi
+alembic
