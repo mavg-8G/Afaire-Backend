@@ -1,5 +1,5 @@
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Depends, Response, Request
+from fastapi import FastAPI, HTTPException, Depends, Response, Request, Cookie
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
@@ -29,6 +29,9 @@ from error_handlers import (
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+import json
+from fastapi import Cookie
+from fastapi.responses import Response
 
 app = FastAPI()
 
@@ -206,17 +209,19 @@ class RefreshToken(Base):
     __table_args__ = (UniqueConstraint('user_id', 'token', name='_user_token_uc'),)
 
 Base.metadata.create_all(bind=db_engine)
-# Seed default admin user for tests
-from sqlalchemy.orm import Session
-_db = SessionLocal()
-try:
-    if not _db.query(User).filter(User.username == 'testuser').first():
-        _db.add(User(name='Test User', username='testuser', hashed_password=get_password_hash('TestPass123!'), is_admin=True))
-        _db.commit()
-except Exception:
-    _db.rollback()
-finally:
-    _db.close()
+# Seed default admin user for tests (only in development)
+import os
+if os.getenv("APP_ENV") == "development":
+    from sqlalchemy.orm import Session
+    _db = SessionLocal()
+    try:
+        if not _db.query(User).filter(User.username == 'testuser').first():
+            _db.add(User(name='Test User', username='testuser', hashed_password=get_password_hash('TestPass123!'), is_admin=True))
+            _db.commit()
+    except Exception:
+        _db.rollback()
+    finally:
+        _db.close()
 
 # Schemas with comprehensive validation
 class ChangePasswordRequest(BaseModel):
@@ -683,14 +688,25 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             # Store refresh token in DB
             db.add(RefreshToken(user_id=user.id, token=refresh_token))
             db.commit()
-            response = {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_type": "bearer",
-                "user_id": user.id,
-                "username": user.username,
-                "is_admin": user.is_admin
-            }
+            response = Response(
+                content=json.dumps({
+                    "access_token": access_token,
+                    "token_type": "bearer",
+                    "user_id": user.id,
+                    "username": user.username,
+                    "is_admin": user.is_admin
+                }),
+                media_type="application/json"
+            )
+            # Set refresh token as HttpOnly cookie
+            response.set_cookie(
+                key="refresh_token",
+                value=refresh_token,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+                max_age=60*60*24*7  # 7 days
+            )
             return response
         except Exception as token_error:
             error_id = SecureErrorResponse.generate_error_id()
@@ -710,11 +726,12 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         )
         return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
-
 @app.post("/refresh-token")
-def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_db)):
+def refresh_token_endpoint(response: Response, refresh_token: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
     """Exchange a valid refresh token for a new access token."""
     try:
+        if not refresh_token:
+            return SecureErrorResponse.authentication_error("Missing refresh token")
         user_id = verify_refresh_token(refresh_token)
         token_obj = db.query(RefreshToken).filter_by(token=refresh_token, revoked=False).first()
         if not token_obj or str(token_obj.user_id) != str(user_id):
@@ -727,22 +744,36 @@ def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_db)):
     except Exception as e:
         return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
 
-
 @app.post("/logout")
-def logout(refresh_token: str, db: Session = Depends(get_db)):
+def logout(response: Response, refresh_token: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
     """Invalidate a refresh token (logout)."""
     try:
+        if not refresh_token:
+            return SecureErrorResponse.authentication_error("Missing refresh token")
         user_id = verify_refresh_token(refresh_token)
         token_obj = db.query(RefreshToken).filter_by(token=refresh_token, revoked=False).first()
         if not token_obj or str(token_obj.user_id) != str(user_id):
             return SecureErrorResponse.authentication_error("Invalid refresh token")
         token_obj.revoked = True
         db.commit()
+        # Remove the cookie
+        response.delete_cookie("refresh_token")
         return {"detail": "Logged out successfully"}
     except Exception as e:
         db.rollback()
         return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
 
+@app.post("/logout-all")
+def logout_all(response: Response, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Logout from all devices by revoking all refresh tokens for the current user."""
+    try:
+        db.query(RefreshToken).filter_by(user_id=current_user.id, revoked=False).update({"revoked": True})
+        db.commit()
+        response.delete_cookie("refresh_token")
+        return {"detail": "Logged out from all devices successfully"}
+    except Exception as e:
+        db.rollback()
+        return SecureErrorResponse.internal_server_error("Failed to logout from all devices")
 
 @app.get("/users")
 def get_users(db: Session = Depends(get_db)):
