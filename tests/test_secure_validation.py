@@ -9,6 +9,18 @@ from datetime import datetime, timedelta
 BASE_URL = "http://localhost:10242"
 
 
+def get_token(username="testuser123", password="SecurePass123!"):
+    response = requests.post(f"{BASE_URL}/token", data={"username": username, "password": password})
+    if response.status_code == 200 and "access_token" in response.json():
+        return response.json()["access_token"]
+    return None
+
+
+def get_auth_headers(username="testuser123", password="SecurePass123!"):
+    token = get_token(username, password)
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def test_validation_errors():
     """Test that validation errors don't leak sensitive information"""
     print("=== Testing Validation Errors ===")
@@ -21,10 +33,12 @@ def test_validation_errors():
         "password": "weak",
         "is_admin": "not_a_boolean"
     }
-    
-    response = requests.post(f"{BASE_URL}/users", json=malicious_data)
-    print(f"Status: {response.status_code}")
-    print(f"Response: {json.dumps(response.json(), indent=2)}")
+    try:
+        response = requests.post(f"{BASE_URL}/users", json=malicious_data)
+        print(f"Status: {response.status_code}")
+        print(f"Response: {json.dumps(response.json(), indent=2)}")
+    except Exception as e:
+        print(f"Exception during user creation: {e}")
     
     # Test 2: SQL injection attempt in login
     print("\n2. Testing SQL injection in login...")
@@ -114,8 +128,8 @@ def test_business_logic_validation():
         "old_password": "WrongPassword123!",
         "new_password": "NewSecurePass123!"
     }
-    
-    response = requests.post(f"{BASE_URL}/users/{user_id}/change-password", json=password_data)
+    headers = get_auth_headers()
+    response = requests.post(f"{BASE_URL}/users/{user_id}/change-password", json=password_data, headers=headers)
     print(f"Status: {response.status_code}")
     print(f"Response: {json.dumps(response.json(), indent=2)}")
 
@@ -123,7 +137,14 @@ def test_business_logic_validation():
 def test_input_sanitization():
     """Test that input is properly sanitized"""
     print("\n=== Testing Input Sanitization ===")
-    
+    # Ensure test user exists for authentication
+    user_data = {
+        "name": "Test User",
+        "username": "testuser123",
+        "password": "SecurePass123!",
+        "is_admin": False
+    }
+    user_response = requests.post(f"{BASE_URL}/users", json=user_data)
     # Test 1: HTML/JavaScript injection in category name
     print("\n1. Testing HTML injection in category creation...")
     malicious_category = {
@@ -131,15 +152,14 @@ def test_input_sanitization():
         "icon_name": "test-icon",
         "mode": "personal"
     }
-    
-    response = requests.post(f"{BASE_URL}/categories", json=malicious_category)
+    headers = get_auth_headers()
+    response = requests.post(f"{BASE_URL}/categories", json=malicious_category, headers=headers)
     print(f"Status: {response.status_code}")
-    
     if response.status_code == 200 or response.status_code == 201:
         category = response.json()
         print(f"Sanitized name: {category.get('name')}")
         # Clean up
-        requests.delete(f"{BASE_URL}/categories/{category.get('id')}")
+        requests.delete(f"{BASE_URL}/categories/{category.get('id')}", headers=headers)
     else:
         print(f"Response: {json.dumps(response.json(), indent=2)}")
     

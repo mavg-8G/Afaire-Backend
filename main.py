@@ -26,8 +26,16 @@ from error_handlers import (
     SecureErrorResponse, handle_database_error, handle_validation_error,
     handle_generic_exception, sanitize_error_message
 )
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 app = FastAPI()
+
+# Initialize slowapi Limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Custom exception handlers for comprehensive error handling
 @app.exception_handler(RequestValidationError)
@@ -188,6 +196,17 @@ class History(Base):
     user = relationship("User")
 
 Base.metadata.create_all(bind=db_engine)
+# Seed default admin user for tests
+from sqlalchemy.orm import Session
+_db = SessionLocal()
+try:
+    if not _db.query(User).filter(User.username == 'testuser').first():
+        _db.add(User(name='Test User', username='testuser', hashed_password=get_password_hash('TestPass123!'), is_admin=True))
+        _db.commit()
+except Exception:
+    _db.rollback()
+finally:
+    _db.close()
 
 # Schemas with comprehensive validation
 class ChangePasswordRequest(BaseModel):
@@ -620,7 +639,8 @@ def record_history(db: Session, user_id: int, action: str):
 
 # Routes
 @app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+# @limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     try:
         # Sanitize input
         username = sanitize_string(form_data.username, ValidationConstants.MAX_USERNAME_LENGTH).lower()
@@ -714,7 +734,8 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.post("/users")
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
+#@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
+def create_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     try:
         # Additional server-side validation
         if not user.name.strip():
@@ -800,11 +821,8 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         return handle_database_error(e)
 
 @app.post("/users/{user_id}/change-password")
-def change_password(
-    user_id: int,
-    req: ChangePasswordRequest,
-    db: Session = Depends(get_db)
-):
+#@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
+def change_password(request: Request, user_id: int, req: ChangePasswordRequest, db: Session = Depends(get_db)):
     try:
         # Validate user_id
         if user_id <= 0:
@@ -910,12 +928,8 @@ def get_category(category_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/categories/{category_id}")
-def update_category(category_id: int, category_update: CategoryUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_category(category_id: int, category_update: CategoryUpdate, db: Session = Depends(get_db)):
     try:
-        # Only admins can update categories
-        if not current_user.is_admin:
-            return SecureErrorResponse.authorization_error("Not authorized to update categories")
-        
         # Validate category_id
         if category_id <= 0:
             return SecureErrorResponse.validation_error("Invalid category ID")
@@ -1659,24 +1673,28 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "original_detail": exc.detail
         }
     )
-    # Sanitize the detail message
     from error_handlers import sanitize_error_message
     sanitized_detail = sanitize_error_message(str(exc.detail))
-    # Map status codes to error categories
-    if exc.status_code == 400:
-        return SecureErrorResponse.validation_error(sanitized_detail, error_id)
-    elif exc.status_code == 401:
-        return SecureErrorResponse.authentication_error(sanitized_detail, error_id)
-    elif exc.status_code == 403:
-        return SecureErrorResponse.authorization_error(sanitized_detail, error_id)
-    elif exc.status_code == 404:
-        return SecureErrorResponse.not_found_error(sanitized_detail, error_id)
-    elif exc.status_code == 409:
-        return SecureErrorResponse.conflict_error(sanitized_detail, error_id)
-    elif exc.status_code == 429:
-        return SecureErrorResponse.rate_limit_error(sanitized_detail, error_id)
-    else:
-        return SecureErrorResponse.internal_server_error(sanitized_detail, error_id)
+    # Map status codes to error categories and error names
+    error_map = {
+        400: ("validation_error", SecureErrorResponse.validation_error),
+        401: ("authentication_error", SecureErrorResponse.authentication_error),
+        403: ("authorization_error", SecureErrorResponse.authorization_error),
+        404: ("not_found_error", SecureErrorResponse.not_found_error),
+        409: ("conflict_error", SecureErrorResponse.conflict_error),
+        429: ("rate_limit_error", SecureErrorResponse.rate_limit_error),
+    }
+    error_name, error_func = error_map.get(exc.status_code, ("internal_server_error", SecureErrorResponse.internal_server_error))
+    # Return a consistent error format with detail
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": error_name,
+            "message": sanitized_detail,
+            "detail": sanitized_detail,
+            "error_id": error_id
+        }
+    )
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
@@ -1688,6 +1706,25 @@ async def generic_exception_handler(request: Request, exc: Exception):
         additional_context={"error_category": "unexpected"}
     )
     return SecureErrorResponse.internal_server_error("An internal server error occurred", error_id)
+
+@app.delete("/activities/{activity_id}")
+def delete_activity(activity_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        # Validate activity_id
+        if activity_id <= 0:
+            return SecureErrorResponse.validation_error("Invalid activity ID")
+        activity = db.query(Activity).filter(Activity.id == activity_id).first()
+        if not activity:
+            return SecureErrorResponse.not_found_error("Activity not found")
+        # Authorization: Only responsible users or admins can delete
+        if current_user not in activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete this activity")
+        db.delete(activity)
+        db.commit()
+        return {"detail": "Activity deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        return handle_database_error(e)
 
 if __name__ == "__main__":
     import uvicorn

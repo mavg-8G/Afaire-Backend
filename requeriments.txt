@@ -9,3 +9,4 @@ passlib[bcrypt]
 pydantic
 bleach
 email-validator
+slowapi

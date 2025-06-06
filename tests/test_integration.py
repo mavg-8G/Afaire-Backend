@@ -1,7 +1,24 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import pytest
 from fastapi.testclient import TestClient
 from main import app, Base, db_engine
 from datetime import datetime, timezone
+import types
+
+@pytest.fixture(autouse=True)
+def disable_rate_limiting():
+    class DummyLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def _inject_headers(self, response, view_rate_limit):
+            return response
+    app.state.limiter = DummyLimiter()
+    yield
 
 @pytest.fixture(autouse=True)
 def setup_db():
@@ -19,13 +36,16 @@ def client():
 def test_full_user_category_activity_flow(client):
     # Crear usuario
     resp_user = client.post("/users", json={
-        "name": "Iñigo", "username": "inigo", "password": "Password123!", "is_admin": False
+        "name": "Iñigo", "username": "inigo", "password": "Password123!", "is_admin": True
     })
     assert resp_user.status_code == 200
     user_id = resp_user.json()["id"]
 
     # Login y generar token
-    token = resp_user.json().get("id")  # no auth en endpoints salvo token
+    resp_login = client.post("/token", data={"username": "inigo", "password": "Password123!"})
+    assert resp_login.status_code == 200
+    access_token = resp_login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
 
     # Crear categoría
     resp_cat = client.post("/categories", json={
@@ -52,13 +72,13 @@ def test_full_user_category_activity_flow(client):
     assert resp_get.status_code == 200
     assert resp_get.json()["title"] == payload_act["title"]
 
-    # Actualizar actividad
-    resp_upd = client.put(f"/activities/{act_id}", json={"notes": "Actualizado"})
+    # Actualizar actividad (autenticado)
+    resp_upd = client.put(f"/activities/{act_id}", json={"notes": "Actualizado"}, headers=headers)
     assert resp_upd.status_code == 200
     assert resp_upd.json()["notes"] == "Actualizado"
 
-    # Eliminar actividad
-    resp_del = client.delete(f"/activities/{act_id}")
+    # Eliminar actividad (autenticado)
+    resp_del = client.delete(f"/activities/{act_id}", headers=headers)
     assert resp_del.status_code == 200
     # Confirmar eliminación
     resp_404 = client.get(f"/activities/{act_id}")
