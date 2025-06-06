@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from VerificarToken import create_access_token, verify_token
+from VerificarToken import create_access_token, verify_token, create_refresh_token, verify_refresh_token
 from validation_utils import (
     ValidationConstants, sanitize_string, validate_username, validate_password,
     validate_time_format, validate_icon_name, validate_days_of_week,
@@ -93,6 +93,15 @@ SessionLocal = sessionmaker(bind=db_engine, autoflush=False, autocommit=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+
+# Dependency to get the current user from the JWT token
+
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    user_id = verify_token(token)
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 # Enums
 class CategoryMode(str, Enum):
@@ -633,9 +642,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         
         try:
             access_token = create_access_token(data={"sub": str(user.id)})
-            
+            refresh_token = create_refresh_token(data={"sub": str(user.id)})
             response = {
-                "access_token": access_token, 
+                "access_token": access_token,
+                "refresh_token": refresh_token,
                 "token_type": "bearer",
                 "user_id": user.id,
                 "username": user.username,
@@ -660,6 +670,20 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             additional_context={"operation": "login"}
         )
         return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
+
+
+@app.post("/refresh-token")
+def refresh_token_endpoint(refresh_token: str, db: Session = Depends(get_db)):
+    """Exchange a valid refresh token for a new access token."""
+    try:
+        user_id = verify_refresh_token(refresh_token)
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user:
+            return SecureErrorResponse.authentication_error("User not found")
+        new_access_token = create_access_token(data={"sub": str(user.id)})
+        return {"access_token": new_access_token, "token_type": "bearer"}
+    except Exception as e:
+        return SecureErrorResponse.authentication_error("Invalid or expired refresh token")
 
 
 @app.get("/users")
@@ -717,7 +741,7 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/users/{user_id}")
-def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
+def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate user_id
         if user_id <= 0:
@@ -726,6 +750,10 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return SecureErrorResponse.not_found_error("User not found")
+
+        # Authorization: Only the user themselves or admin can update
+        if current_user.id != user_id and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to update this user")
         
         # Check if username already exists (case-insensitive, excluding current user)
         if user_update.username is not None:
@@ -802,7 +830,7 @@ def change_password(
 
 
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate user_id
         if user_id <= 0:
@@ -811,6 +839,10 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return SecureErrorResponse.not_found_error("User not found")
+
+        # Authorization: Only the user themselves or admin can delete
+        if current_user.id != user_id and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete this user")
         
         # Check if user has associated activities before deletion
         user_activities = db.query(Activity).join(activity_user).filter(activity_user.c.user_id == user_id).first()
@@ -870,8 +902,12 @@ def get_category(category_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/categories/{category_id}")
-def update_category(category_id: int, category_update: CategoryUpdate, db: Session = Depends(get_db)):
+def update_category(category_id: int, category_update: CategoryUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
+        # Only admins can update categories
+        if not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to update categories")
+        
         # Validate category_id
         if category_id <= 0:
             return SecureErrorResponse.validation_error("Invalid category ID")
@@ -907,8 +943,12 @@ def update_category(category_id: int, category_update: CategoryUpdate, db: Sessi
         return handle_database_error(e)
 
 @app.delete("/categories/{category_id}")
-def delete_category(category_id: int, db: Session = Depends(get_db)):
+def delete_category(category_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
+        # Only admins can delete categories
+        if not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete categories")
+        
         # Validate category_id
         if category_id <= 0:
             return SecureErrorResponse.validation_error("Invalid category ID")
@@ -1083,7 +1123,7 @@ def get_activity(activity_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/activities/{activity_id}")
-def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Session = Depends(get_db)):
+def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate activity_id
         if activity_id <= 0:
@@ -1092,6 +1132,10 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
+
+        # Authorization: Only responsible users or admins can update
+        if current_user not in activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to update this activity")
 
         update_data = activity_update.model_dump(exclude_unset=True)
         
@@ -1175,7 +1219,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
         return handle_database_error(e)
 
 @app.delete("/activities/{activity_id}")
-def delete_activity(activity_id: int, db: Session = Depends(get_db)):
+def delete_activity(activity_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate activity_id
         if activity_id <= 0:
@@ -1184,7 +1228,11 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db)):
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
-        
+
+        # Authorization: Only responsible users or admins can delete
+        if current_user not in activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete this activity")
+
         db.delete(activity)
         db.commit()
         
@@ -1276,8 +1324,7 @@ def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session
         return handle_database_error(e)
 
 @app.put("/activity-occurrences/{occurrence_id}")
-def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db)):
-    """Actualizar una ocurrencia de actividad"""
+def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate occurrence_id
         if occurrence_id <= 0:
@@ -1286,7 +1333,11 @@ def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOc
         occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
         if not occurrence:
             return SecureErrorResponse.not_found_error("Activity occurrence not found")
-        
+
+        # Authorization: Only responsible users or admins can update
+        if current_user not in occurrence.activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to update this occurrence")
+
         update_data = occurrence_update.model_dump(exclude_unset=True)
         
         # Additional validation for date if being updated
@@ -1324,7 +1375,7 @@ def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOc
         return handle_database_error(e)
 
 @app.delete("/activity-occurrences/{occurrence_id}")
-def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Eliminar una ocurrencia de actividad"""
     try:
         # Validate occurrence_id
@@ -1334,7 +1385,11 @@ def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)
         occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
         if not occurrence:
             return SecureErrorResponse.not_found_error("Activity occurrence not found")
-        
+
+        # Authorization: Only responsible users or admins can delete
+        if current_user not in occurrence.activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete this occurrence")
+
         db.delete(occurrence)
         db.commit()
         return {"detail": "Activity occurrence deleted successfully"}
@@ -1505,7 +1560,7 @@ def get_todo(todo_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/todos/{todo_id}")
-def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get_db)):
+def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate todo_id
         if todo_id <= 0:
@@ -1514,6 +1569,10 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
         todo = db.query(Todo).filter(Todo.id == todo_id).first()
         if not todo:
             return SecureErrorResponse.not_found_error("Todo not found")
+
+        # Authorization: Only responsible users or admins can update
+        if current_user not in todo.activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to update this todo")
         
         update_data = todo_update.model_dump(exclude_unset=True)
         
@@ -1534,7 +1593,7 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
         return handle_database_error(e)
 
 @app.delete("/todos/{todo_id}")
-def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+def delete_todo(todo_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate todo_id
         if todo_id <= 0:
@@ -1543,6 +1602,10 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db)):
         todo = db.query(Todo).filter(Todo.id == todo_id).first()
         if not todo:
             return SecureErrorResponse.not_found_error("Todo not found")
+
+        # Authorization: Only responsible users or admins can delete
+        if current_user not in todo.activity.responsibles and not current_user.is_admin:
+            return SecureErrorResponse.authorization_error("Not authorized to delete this todo")
         
         db.delete(todo)
         db.commit()
