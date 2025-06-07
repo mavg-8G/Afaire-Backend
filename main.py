@@ -710,14 +710,14 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             )
             return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
-        response = Response(
-            content=json.dumps({
+        response = JSONResponse(
+            content={
                 "access_token": access_token,
                 "token_type": "bearer",
                 "user_id": user.id,
                 "username": user.username,
                 "is_admin": user.is_admin
-            }),
+            }
         )
         response.set_cookie(
             key="refresh_token",
@@ -736,6 +736,10 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             error=e,
             additional_context={"operation": "login"}
         )
+        # Log to app_errors.log as well
+        with open("app_errors.log", "a", encoding="utf-8") as logf:
+            import traceback
+            logf.write(f"[{datetime.now().isoformat()}] [LOGIN ERROR] {str(e)}\n{traceback.format_exc()}\n")
         return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
 @app.post("/refresh-token")
