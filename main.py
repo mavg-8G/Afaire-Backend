@@ -718,7 +718,6 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
                 "username": user.username,
                 "is_admin": user.is_admin
             }),
-            media_type="application/json"
         )
         response.set_cookie(
             key="refresh_token",
