@@ -1101,6 +1101,7 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         if not activity.title.strip():
             return SecureErrorResponse.validation_error("Activity title cannot be empty")
         # (Removed validation that blocks past start dates)
+        start_date_error_sent = False
         if activity.start_date.tzinfo is None:
             activity_start_utc = activity.start_date.replace(tzinfo=timezone.utc)
         else:
