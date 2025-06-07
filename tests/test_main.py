@@ -413,12 +413,21 @@ def test_update_todo_not_found():
     assert response.status_code == 404
 
 def test_delete_todo_success():
+    # Create a user and authenticate as that user
+    user = create_user_helper(username="todo_owner", password="TestPass123!")
+    headers = get_auth_headers(username="todo_owner", password="TestPass123!")
     cat = create_category_helper(name="Cat19")
-    resp = create_activity_helper(category_id=cat.id)
+    # Create an activity as the authenticated user
+    resp = create_activity_helper(category_id=cat.id, responsible_ids=[user.id])
     activity_id = resp.json()["id"]
-    todo_resp = client.post(f"/activities/{activity_id}/todos", json={"text": "Todo5", "complete": False}, headers=get_auth_headers())
+    # Add a todo to the activity as the same user
+    todo_resp = client.post(
+        f"/activities/{activity_id}/todos",
+        json={"text": "Todo5", "complete": False},
+        headers=headers
+    )
     todo_id = todo_resp.json()["id"]
-    headers = get_auth_headers()
+    # Delete the todo as the same user
     response = client.delete(f"/todos/{todo_id}", headers=headers)
     assert response.status_code == 200
 

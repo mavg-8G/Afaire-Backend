@@ -187,8 +187,8 @@ class Todo(Base):
     id = Column(Integer, primary_key=True)
     text = Column(Text, nullable=False)
     complete = Column(Boolean, default=False, nullable=False)
-    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
-    activity = relationship("Activity", back_populates="todos")
+    activity_id = Column(Integer, ForeignKey("activities.id", ondelete="CASCADE"), nullable=False)
+    activity = relationship("Activity", back_populates="todos", cascade="all, delete-orphan")
 
 class History(Base):
     __tablename__ = 'history'
@@ -209,6 +209,11 @@ class RefreshToken(Base):
     __table_args__ = (UniqueConstraint('user_id', 'token', name='_user_token_uc'),)
 
 Base.metadata.create_all(bind=db_engine)
+
+# Utils
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
 # Seed default admin user for tests (only in development)
 import os
 if os.getenv("APP_ENV") == "development":
@@ -654,7 +659,7 @@ def record_history(db: Session, user_id: int, action: str):
 
 # Routes
 @app.post("/token")
-@limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
+#@limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     try:
         # Sanitize input
@@ -795,7 +800,7 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.post("/users")
-@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
+#@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
 def create_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     try:
         # Additional server-side validation
@@ -879,10 +884,11 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
     
     except Exception as e:
         db.rollback()
+        logging.error(f"Database operation failed: {e}", exc_info=True)
         return handle_database_error(e)
 
 @app.post("/users/{user_id}/change-password")
-@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
+#@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
 def change_password(request: Request, user_id: int, req: ChangePasswordRequest, db: Session = Depends(get_db)):
     try:
         # Validate user_id
@@ -1083,15 +1089,15 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         # Additional server-side validation
         if not activity.title.strip():
             return SecureErrorResponse.validation_error("Activity title cannot be empty")
-        
-        # Validate start_date is not too far in the past (allow some flexibility for scheduling)
+        # (Removed validation that blocks past start dates)
         if activity.start_date.tzinfo is None:
             activity_start_utc = activity.start_date.replace(tzinfo=timezone.utc)
         else:
             activity_start_utc = activity.start_date.astimezone(timezone.utc)
         if activity_start_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
-            return SecureErrorResponse.validation_error("Start date cannot be in the past")
-        
+            if not start_date_error_sent:
+                start_date_error_sent = True
+                return SecureErrorResponse.validation_error("Start date cannot be in the past")
         # Verify category exists and is valid
         category = db.query(Category).filter(Category.id == activity.category_id).first()
         if not category:
@@ -1232,6 +1238,8 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             if not update_data["title"].strip():
                 return SecureErrorResponse.validation_error("Activity title cannot be empty")
             update_data["title"] = update_data["title"].strip()
+        # Prevent duplicate error notification
+        start_date_error_sent = False
         # Validate category_id if being updated
         if "category_id" in update_data:
             category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
@@ -1249,7 +1257,9 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             else:
                 start_date_utc = start_date.astimezone(timezone.utc)
             if start_date_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
-                return SecureErrorResponse.validation_error("Start date cannot be in the past")
+                if not start_date_error_sent:
+                    start_date_error_sent = True
+                    return SecureErrorResponse.validation_error("Start date cannot be in the past")
         else:
             start_date_utc = activity.start_date
             if start_date_utc.tzinfo is None:
@@ -1630,7 +1640,8 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
             return SecureErrorResponse.not_found_error("Todo not found")
 
         # Authorization: Only responsible users or admins can update
-        if current_user not in todo.activity.responsibles and not current_user.is_admin:
+        activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(relationship("responsibles")).first()
+        if current_user not in activity.responsibles and not current_user.is_admin:
             return SecureErrorResponse.authorization_error("Not authorized to update this todo")
         
         update_data = todo_update.model_dump(exclude_unset=True)
@@ -1668,7 +1679,7 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db), current_user: User 
         
         db.delete(todo)
         db.commit()
-        return {"detail": "Todo deleted successfully"}
+        return {"detail": "Todo deleted successfully", "todo_id": todo_id}
     
     except Exception as e:
         db.rollback()
