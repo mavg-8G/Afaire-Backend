@@ -43,50 +43,83 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Custom exception handlers for comprehensive error handling
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handle Pydantic validation errors with secure error messages"""
+    """Handle Pydantic validation errors with secure error messages and log request body/query params"""
+    # Log with full request context
+    SecureErrorResponse.log_detailed_error(
+        error_id=SecureErrorResponse.generate_error_id(),
+        error=exc,
+        request=request,
+        additional_context={
+            "error_category": "validation",
+            "validation_errors": exc.errors()
+        }
+    )
     return handle_validation_error(exc, request)
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     """Handle ValueError exceptions from custom validation"""
+    SecureErrorResponse.log_detailed_error(
+        error_id=SecureErrorResponse.generate_error_id(),
+        error=exc,
+        request=request,
+        additional_context={"error_category": "value_error"}
+    )
     return handle_validation_error(exc, request)
 
 @app.exception_handler(ValidationError)
 async def pydantic_validation_error_handler(request: Request, exc: ValidationError):
     """Handle Pydantic ValidationError exceptions"""
+    SecureErrorResponse.log_detailed_error(
+        error_id=SecureErrorResponse.generate_error_id(),
+        error=exc,
+        request=request,
+        additional_context={"error_category": "validation", "validation_errors": exc.errors()}
+    )
     return handle_validation_error(exc, request)
 
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
     """Handle database errors securely"""
+    SecureErrorResponse.log_detailed_error(
+        error_id=SecureErrorResponse.generate_error_id(),
+        error=exc,
+        request=request,
+        additional_context={"error_category": "database", "error_type": type(exc).__name__}
+    )
     return handle_database_error(exc, request)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with consistent formatting"""
-    error_id = SecureErrorResponse.generate_error_id()
-    
-    # Log the error for tracking
+    """Handle HTTP exceptions with consistent formatting and log all context"""
     SecureErrorResponse.log_detailed_error(
-        error_id=error_id,
+        error_id=SecureErrorResponse.generate_error_id(),
         error=exc,
         request=request,
-        additional_context={"status_code": exc.status_code, "detail": exc.detail}
+        additional_context={
+            "error_category": "http_exception",
+            "status_code": exc.status_code,
+            "original_detail": exc.detail
+        }
     )
-    
-    # Return consistent error format
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": f"HTTP_{exc.status_code}",
             "message": sanitize_error_message(str(exc.detail)),
-            "error_id": error_id
+            "error_id": SecureErrorResponse.generate_error_id()
         }
     )
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    """Handle unexpected exceptions securely"""
+    """Handle unexpected exceptions securely and log all context"""
+    SecureErrorResponse.log_detailed_error(
+        error_id=SecureErrorResponse.generate_error_id(),
+        error=exc,
+        request=request,
+        additional_context={"error_category": "unexpected"}
+    )
     return handle_generic_exception(exc, request)
 
 app.add_middleware(

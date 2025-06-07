@@ -52,7 +52,7 @@ class SecureErrorResponse:
         user_id: Optional[int] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ):
-        """Log detailed error information server-side"""
+        """Log detailed error information server-side, including request body and query params if available"""
         error_details = {
             "error_id": error_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -70,6 +70,29 @@ class SecureErrorResponse:
                 "request_headers": dict(request.headers),
                 "client_ip": getattr(request.client, 'host', 'unknown') if request.client else 'unknown'
             })
+            # Try to log query params
+            try:
+                error_details["query_params"] = dict(request.query_params)
+            except Exception:
+                error_details["query_params"] = "<unavailable>"
+            # Try to log request body for POST/PUT/PATCH
+            if request.method in ("POST", "PUT", "PATCH"):
+                try:
+                    # Read body safely (request body can only be read once, so this is best-effort)
+                    import asyncio
+                    body = None
+                    if hasattr(request, "_body") and request._body is not None:
+                        body = request._body
+                    else:
+                        body = asyncio.run(request.body())
+                    # Try to decode as utf-8 and parse as JSON
+                    import json
+                    try:
+                        error_details["request_body"] = json.loads(body.decode("utf-8"))
+                    except Exception:
+                        error_details["request_body"] = body.decode("utf-8", errors="replace")
+                except Exception:
+                    error_details["request_body"] = "<unavailable>"
         
         logger.error(f"Detailed error logged: {error_details}")
     
