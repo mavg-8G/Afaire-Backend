@@ -7,3 +7,4 @@ __pycache__/*
 app_errors.log
 todo_app.db
 *.db
+alembic/versions/*.py

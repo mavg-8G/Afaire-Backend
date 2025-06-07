@@ -11,3 +11,4 @@ bleach
 email-validator
 slowapi
 alembic
+python-dotenv

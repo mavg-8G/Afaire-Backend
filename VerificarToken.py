@@ -2,7 +2,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
+from dotenv import load_dotenv
 
+load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"

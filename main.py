@@ -172,7 +172,7 @@ class Activity(Base):
     mode = Column(SqlEnum(CategoryMode), nullable=False)
     category = relationship("Category")
     responsibles = relationship("User", secondary=activity_user, backref="activities")
-    todos = relationship("Todo", back_populates="activity", cascade="all, delete-orphan")
+    todos = relationship("Todo", back_populates="activity", cascade="all, delete-orphan", single_parent=True)
 
 class ActivityOccurrence(Base):
     __tablename__ = 'activity_occurrences'
@@ -188,7 +188,7 @@ class Todo(Base):
     text = Column(Text, nullable=False)
     complete = Column(Boolean, default=False, nullable=False)
     activity_id = Column(Integer, ForeignKey("activities.id", ondelete="CASCADE"), nullable=False)
-    activity = relationship("Activity", back_populates="todos", cascade="all, delete-orphan")
+    activity = relationship("Activity", back_populates="todos")
 
 class History(Base):
     __tablename__ = 'history'
