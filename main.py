@@ -659,70 +659,78 @@ def record_history(db: Session, user_id: int, action: str):
 
 # Routes
 @app.post("/token")
-#@limiter.limit("5/minute")  # Limit to 5 login attempts per minute per IP
+@limiter.limit("5/minute")
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     try:
         # Sanitize input
         username = sanitize_string(form_data.username, ValidationConstants.MAX_USERNAME_LENGTH).lower()
         password = form_data.password
-        
+
         # Additional validation
         if not username:
             return SecureErrorResponse.validation_error("Invalid credentials")
         if not password:
             return SecureErrorResponse.validation_error("Invalid credentials")
-        
+
         # Validate username format
         try:
             validate_username(username)
         except ValueError:
-            # Don't reveal that username format is invalid for security
             return SecureErrorResponse.authentication_error("Invalid credentials")
-        
+
         user = db.query(User).filter(User.username == username).first()
         if not user:
             return SecureErrorResponse.authentication_error("Invalid credentials")
-        
+
         password_valid = pwd_context.verify(password, user.hashed_password)
-        
         if not password_valid:
             return SecureErrorResponse.authentication_error("Invalid credentials")
+
+        access_token = create_access_token(data={"sub": str(user.id)})
+        refresh_token = create_refresh_token(data={"sub": str(user.id)})
+
+        # Try to add refresh token, handle unique constraint
         try:
-            access_token = create_access_token(data={"sub": str(user.id)})
-            refresh_token = create_refresh_token(data={"sub": str(user.id)})
-            # Store refresh token in DB
             db.add(RefreshToken(user_id=user.id, token=refresh_token))
             db.commit()
-            response = Response(
-                content=json.dumps({
-                    "access_token": access_token,
-                    "token_type": "bearer",
-                    "user_id": user.id,
-                    "username": user.username,
-                    "is_admin": user.is_admin
-                }),
-                media_type="application/json"
-            )
-            # Set refresh token as HttpOnly cookie
-            response.set_cookie(
-                key="refresh_token",
-                value=refresh_token,
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                max_age=60*60*24*7  # 7 days
-            )
-            return response
-        except Exception as token_error:
+        except IntegrityError:
+            db.rollback()
+            # If a refresh token for this user already exists, revoke all and add new
+            db.query(RefreshToken).filter_by(user_id=user.id, revoked=False).update({"revoked": True})
+            db.commit()
+            db.add(RefreshToken(user_id=user.id, token=refresh_token))
+            db.commit()
+        except Exception as token_db_error:
+            db.rollback()
             error_id = SecureErrorResponse.generate_error_id()
             SecureErrorResponse.log_detailed_error(
                 error_id=error_id,
-                error=token_error,
+                error=token_db_error,
                 additional_context={"operation": "token_creation", "user_id": user.id}
             )
             return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
+
+        response = Response(
+            content=json.dumps({
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user_id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin
+            }),
+            media_type="application/json"
+        )
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=60*60*24*7  # 7 days
+        )
+        return response
+
     except Exception as e:
-        # Log detailed error and return generic response
         error_id = SecureErrorResponse.generate_error_id()
         SecureErrorResponse.log_detailed_error(
             error_id=error_id,
@@ -800,7 +808,7 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.post("/users")
-#@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
+@limiter.limit("3/minute")  # Limit to 3 user creations per minute per IP
 def create_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     try:
         # Additional server-side validation
@@ -888,7 +896,7 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         return handle_database_error(e)
 
 @app.post("/users/{user_id}/change-password")
-#@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
+@limiter.limit("3/minute")  # Limit to 3 password changes per minute per IP
 def change_password(request: Request, user_id: int, req: ChangePasswordRequest, db: Session = Depends(get_db)):
     try:
         # Validate user_id
