@@ -11,7 +11,7 @@ import html
 import bleach
 import logging
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum, UniqueConstraint
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -1670,7 +1670,7 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
             return SecureErrorResponse.not_found_error("Todo not found")
 
         # Authorization: Only responsible users or admins can update
-        activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(relationship("responsibles")).first()
+        activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(joinedload(Activity.responsibles)).first()
         if current_user not in activity.responsibles and not current_user.is_admin:
             return SecureErrorResponse.authorization_error("Not authorized to update this todo")
         
