@@ -241,6 +241,36 @@ class RefreshToken(Base):
     user = relationship('User')
     __table_args__ = (UniqueConstraint('user_id', 'token', name='_user_token_uc'),)
 
+# New Habit models
+class Habit(Base):
+    __tablename__ = 'habits'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    name = Column(String, nullable=False)
+    icon_name = Column(String, nullable=False)
+    user = relationship('User', backref=backref('habits', cascade='all, delete-orphan'))
+    slots = relationship('HabitSlot', back_populates='habit', cascade='all, delete-orphan', single_parent=True)
+
+class HabitSlot(Base):
+    __tablename__ = 'habit_slots'
+    id = Column(Integer, primary_key=True, index=True)
+    habit_id = Column(Integer, ForeignKey('habits.id', ondelete='CASCADE'), nullable=False)
+    name = Column(String, nullable=False)
+    default_time = Column(String, nullable=True)
+    order = Column(Integer, nullable=False, default=0)
+    habit = relationship('Habit', back_populates='slots')
+
+class HabitCompletion(Base):
+    __tablename__ = 'habit_completions'
+    id = Column(Integer, primary_key=True)
+    habit_id = Column(Integer, ForeignKey('habits.id'), nullable=False)
+    slot_id = Column(Integer, ForeignKey('habit_slots.id'), nullable=False)
+    completion_date = Column(DateTime, nullable=False)
+    is_completed = Column(Boolean, default=False)
+    __table_args__ = (UniqueConstraint('habit_id', 'slot_id', 'completion_date', name='_habit_slot_date_uc'),)
+    habit = relationship('Habit', backref='completions')
+    slot = relationship('HabitSlot')
+
 Base.metadata.create_all(bind=db_engine)
 
 # Utils
@@ -674,6 +704,82 @@ class HistoryCreate(BaseModel):
     @classmethod
     def validate_user_id(cls, v):
         return validate_positive_integer(v, "user_id")
+    
+# Habit Schemas
+class HabitSlotCreate(BaseModel):
+    name: str
+    default_time: Optional[str] = None
+
+class HabitSlotResponse(BaseModel):
+    id: int
+    name: str
+    default_time: Optional[str]
+    class Config:
+        from_attributes = True
+
+class HabitCreate(BaseModel):
+    name: str
+    icon_name: str
+    slots: List[HabitSlotCreate]
+
+class HabitUpdate(BaseModel):
+    name: Optional[str] = None
+    icon_name: Optional[str] = None
+    slots: Optional[List[HabitSlotCreate]] = None
+
+class HabitResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    icon_name: str
+    slots: List[HabitSlotResponse]
+    class Config:
+        from_attributes = True
+
+# HabitCompletion Schemas
+class HabitCompletionCreate(BaseModel):
+    habit_id: int
+    slot_id: int
+    completion_date: datetime
+    is_completed: bool = False
+
+    @field_validator('habit_id')
+    @classmethod
+    def validate_habit_id(cls, v):
+        return validate_positive_integer(v, 'habit_id')
+
+    @field_validator('slot_id')
+    @classmethod
+    def validate_slot_id(cls, v):
+        return validate_positive_integer(v, 'slot_id')
+
+    @field_validator('is_completed')
+    @classmethod
+    def validate_is_completed(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError('is_completed must be a boolean')
+        return v
+
+class HabitCompletionUpdate(BaseModel):
+    is_completed: bool
+
+    @field_validator('is_completed')
+    @classmethod
+    def validate_is_completed(cls, v):
+        if not isinstance(v, bool):
+            raise ValueError('is_completed must be a boolean')
+        return v
+
+class HabitCompletionResponse(BaseModel):
+    id: int
+    habit_id: int
+    slot_id: int
+    completion_date: datetime
+    is_completed: bool
+
+    class Config:
+        from_attributes = True
+
 # Dependency
 def get_db():
     db = SessionLocal()
@@ -1830,7 +1936,130 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db), current_use
         db.rollback()
         return handle_database_error(e)
 
+
+
+# Habit Endpoints
+@app.post('/api/habits', response_model=HabitResponse)
+def create_habit(habit_in: HabitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    db_habit = Habit(user_id=current_user.id, name=habit_in.name, icon_name=habit_in.icon_name)
+    db.add(db_habit)
+    db.commit()
+    # create slots
+    for idx, slot in enumerate(habit_in.slots):
+        db_slot = HabitSlot(habit_id=db_habit.id, name=slot.name, default_time=slot.default_time, order=idx)
+        db.add(db_slot)
+    db.commit()
+    db.refresh(db_habit)
+    return db_habit
+
+@app.get('/api/habits', response_model=List[HabitResponse])
+def list_habits(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
+    return habits
+
+@app.put('/api/habits/{habit_id}', response_model=HabitResponse)
+def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
+    if not habit:
+        return SecureErrorResponse.not_found_error('Habit not found')
+    # update fields
+    if habit_in.name is not None:
+        habit.name = habit_in.name
+    if habit_in.icon_name is not None:
+        habit.icon_name = habit_in.icon_name
+    # update slots if provided
+    if habit_in.slots is not None:
+        # existing slots
+        existing = {slot.id: slot for slot in habit.slots}
+        incoming = []
+        for idx, slot_in in enumerate(habit_in.slots):
+            # match by name if id not provided
+            db_slot = None
+            for s in habit.slots:
+                if slot_in.name == s.name and slot_in.default_time == s.default_time:
+                    db_slot = s
+                    break
+            if slot_in.name and hasattr(slot_in, 'id') and slot_in.id and slot_in.id in existing:
+                db_slot = existing[slot_in.id]
+            if db_slot:
+                db_slot.name = slot_in.name
+                db_slot.default_time = slot_in.default_time
+                db_slot.order = idx
+            else:
+                db_slot = HabitSlot(habit_id=habit.id, name=slot_in.name, default_time=slot_in.default_time, order=idx)
+                db.add(db_slot)
+            incoming.append(db_slot)
+        # delete removed
+        to_delete = [s for s in habit.slots if s not in incoming]
+        for s in to_delete:
+            db.delete(s)
+    db.commit()
+    db.refresh(habit)
+    return habit
+
+@app.delete('/api/habits/{habit_id}', status_code=204)
+def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
+    if not habit:
+        return SecureErrorResponse.not_found_error('Habit not found')
+    db.delete(habit)
+    db.commit()
+    return Response(status_code=204)
+
+# HabitCompletion Endpoints
+@app.post('/api/habit_completions', response_model=HabitCompletionResponse)
+def create_habit_completion(completion_in: HabitCompletionCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Validate habit ownership
+    habit = db.query(Habit).filter(Habit.id == completion_in.habit_id, Habit.user_id == current_user.id).first()
+    if not habit:
+        return SecureErrorResponse.not_found_error("Habit not found")
+    # Validate slot ownership
+    slot = db.query(HabitSlot).filter(HabitSlot.id == completion_in.slot_id, HabitSlot.habit_id == habit.id).first()
+    if not slot:
+        return SecureErrorResponse.not_found_error("Habit slot not found")
+    db_completion = HabitCompletion(
+        habit_id=completion_in.habit_id,
+        slot_id=completion_in.slot_id,
+        completion_date=completion_in.completion_date,
+        is_completed=completion_in.is_completed
+    )
+    db.add(db_completion)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return SecureErrorResponse.conflict_error("Completion for this date already exists")
+    db.refresh(db_completion)
+    return db_completion
+
+@app.get('/api/habit_completions', response_model=List[HabitCompletionResponse])
+def list_habit_completions(habit_id: Optional[int] = None, slot_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    query = db.query(HabitCompletion).join(Habit).filter(Habit.user_id == current_user.id)
+    if habit_id is not None:
+        query = query.filter(HabitCompletion.habit_id == habit_id)
+    if slot_id is not None:
+        query = query.filter(HabitCompletion.slot_id == slot_id)
+    return query.all()
+
+@app.put('/api/habit_completions/{completion_id}', response_model=HabitCompletionResponse)
+def update_habit_completion(completion_id: int, completion_in: HabitCompletionUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    comp = db.query(HabitCompletion).join(Habit).filter(HabitCompletion.id == completion_id, Habit.user_id == current_user.id).first()
+    if not comp:
+        return SecureErrorResponse.not_found_error("Completion not found")
+    comp.is_completed = completion_in.is_completed
+    db.commit()
+    db.refresh(comp)
+    return comp
+
+@app.delete('/api/habit_completions/{completion_id}', status_code=204)
+def delete_habit_completions(completion_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    comp = db.query(HabitCompletion).join(Habit).filter(HabitCompletion.id == completion_id, Habit.user_id == current_user.id).first()
+    if not comp:
+        return SecureErrorResponse.not_found_error("Completion not found")
+    db.delete(comp)
+    db.commit()
+    return Response(status_code=204)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10242, reload=True)
-
