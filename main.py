@@ -1133,16 +1133,12 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         # Additional server-side validation
         if not activity.title.strip():
             return SecureErrorResponse.validation_error("Activity title cannot be empty")
-        # (Removed validation that blocks past start dates)
-        start_date_error_sent = False
+        
+        # Convert start_date to UTC for end_date logic
         if activity.start_date.tzinfo is None:
             activity_start_utc = activity.start_date.replace(tzinfo=timezone.utc)
         else:
             activity_start_utc = activity.start_date.astimezone(timezone.utc)
-        if activity_start_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
-            if not start_date_error_sent:
-                start_date_error_sent = True
-                return SecureErrorResponse.validation_error("Start date cannot be in the past")
         # Verify category exists and is valid
         category = db.query(Category).filter(Category.id == activity.category_id).first()
         if not category:
@@ -1283,8 +1279,6 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             if not update_data["title"].strip():
                 return SecureErrorResponse.validation_error("Activity title cannot be empty")
             update_data["title"] = update_data["title"].strip()
-        # Prevent duplicate error notification
-        start_date_error_sent = False
         # Validate category_id if being updated
         if "category_id" in update_data:
             category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
@@ -1294,17 +1288,13 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             if new_mode not in [category.mode, CategoryMode.both]:
                 if category.mode != CategoryMode.both:
                     return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
-        # Validate start_date if being updated
+        # Convert start_date to UTC for consistency if being updated
         if "start_date" in update_data:
             start_date = update_data["start_date"]
             if start_date.tzinfo is None:
                 start_date_utc = start_date.replace(tzinfo=timezone.utc)
             else:
                 start_date_utc = start_date.astimezone(timezone.utc)
-            if start_date_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
-                if not start_date_error_sent:
-                    start_date_error_sent = True
-                    return SecureErrorResponse.validation_error("Start date cannot be in the past")
         else:
             start_date_utc = activity.start_date
             if start_date_utc.tzinfo is None:
