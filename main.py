@@ -1360,14 +1360,12 @@ def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session
         activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
-        # Additional validation for occurrence date
+        # Additional validation for occurrence date: convert to UTC
         occ_date = occurrence.date
         if occ_date.tzinfo is None:
             occ_date_utc = occ_date.replace(tzinfo=timezone.utc)
         else:
             occ_date_utc = occ_date.astimezone(timezone.utc)
-        if occ_date_utc < datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0):
-            return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
         # Check for duplicate occurrence (same activity and date)
         existing_occurrence = db.query(ActivityOccurrence).filter(
             ActivityOccurrence.activity_id == occurrence.activity_id,
@@ -1446,11 +1444,8 @@ def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOc
         
         # Additional validation for date if being updated
         if "date" in update_data:
-            new_date = update_data["date"]
-            if new_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
-                return SecureErrorResponse.validation_error("Occurrence date cannot be in the past")
-            
             # Check for duplicate occurrence with new date
+            new_date = update_data["date"]
             if new_date != occurrence.date:
                 existing_occurrence = db.query(ActivityOccurrence).filter(
                     ActivityOccurrence.activity_id == occurrence.activity_id,
