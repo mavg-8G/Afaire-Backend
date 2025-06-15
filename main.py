@@ -1939,63 +1939,77 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db), current_use
 
 
 # Habit Endpoints
-@app.post('/api/habits', response_model=HabitResponse)
-def create_habit(habit_in: HabitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_habit = Habit(user_id=current_user.id, name=habit_in.name, icon_name=habit_in.icon_name)
-    db.add(db_habit)
-    db.commit()
-    # create slots
-    for idx, slot in enumerate(habit_in.slots):
-        db_slot = HabitSlot(habit_id=db_habit.id, name=slot.name, default_time=slot.default_time, order=idx)
-        db.add(db_slot)
-    db.commit()
-    db.refresh(db_habit)
-    return db_habit
-
 @app.get('/api/habits', response_model=List[HabitResponse])
-def list_habits(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_habits_with_slots(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
     return habits
 
+@app.post('/api/habits', response_model=HabitResponse)
+def create_habit(habit_in: HabitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        db_habit = Habit(user_id=current_user.id, name=habit_in.name, icon_name=habit_in.icon_name)
+        db.add(db_habit)
+        db.commit()
+        # create slots
+        for idx, slot in enumerate(habit_in.slots):
+            db_slot = HabitSlot(habit_id=db_habit.id, name=slot.name, default_time=slot.default_time, order=idx)
+            db.add(db_slot)
+        db.commit()
+        db.refresh(db_habit)
+        return db_habit
+    except Exception as e:
+        db.rollback()
+        with open("app_errors.log", "a", encoding="utf-8") as logf:
+            import traceback
+            logf.write(f"[{datetime.now().isoformat()}] [CREATE_HABIT ERROR] {str(e)}\n{traceback.format_exc()}\n")
+        return SecureErrorResponse.internal_server_error("Failed to create habit")
+
 @app.put('/api/habits/{habit_id}', response_model=HabitResponse)
 def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
-    if not habit:
-        return SecureErrorResponse.not_found_error('Habit not found')
-    # update fields
-    if habit_in.name is not None:
-        habit.name = habit_in.name
-    if habit_in.icon_name is not None:
-        habit.icon_name = habit_in.icon_name
-    # update slots if provided
-    if habit_in.slots is not None:
-        # existing slots
-        existing = {slot.id: slot for slot in habit.slots}
-        incoming = []
-        for idx, slot_in in enumerate(habit_in.slots):
-            # match by name if id not provided
-            db_slot = None
-            for s in habit.slots:
-                if slot_in.name == s.name and slot_in.default_time == s.default_time:
-                    db_slot = s
-                    break
-            if slot_in.name and hasattr(slot_in, 'id') and slot_in.id and slot_in.id in existing:
-                db_slot = existing[slot_in.id]
-            if db_slot:
-                db_slot.name = slot_in.name
-                db_slot.default_time = slot_in.default_time
-                db_slot.order = idx
-            else:
-                db_slot = HabitSlot(habit_id=habit.id, name=slot_in.name, default_time=slot_in.default_time, order=idx)
-                db.add(db_slot)
-            incoming.append(db_slot)
-        # delete removed
-        to_delete = [s for s in habit.slots if s not in incoming]
-        for s in to_delete:
-            db.delete(s)
-    db.commit()
-    db.refresh(habit)
-    return habit
+    try:
+        habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
+        if not habit:
+            return SecureErrorResponse.not_found_error('Habit not found')
+        # update fields
+        if habit_in.name is not None:
+            habit.name = habit_in.name
+        if habit_in.icon_name is not None:
+            habit.icon_name = habit_in.icon_name
+        # update slots if provided
+        if habit_in.slots is not None:
+            # existing slots
+            existing = {slot.id: slot for slot in habit.slots}
+            incoming = []
+            for idx, slot_in in enumerate(habit_in.slots):
+                # match by name if id not provided
+                db_slot = None
+                for s in habit.slots:
+                    if slot_in.name == s.name and slot_in.default_time == s.default_time:
+                        db_slot = s
+                        break
+                if slot_in.name and hasattr(slot_in, 'id') and slot_in.id and slot_in.id in existing:
+                    db_slot = existing[slot_in.id]
+                if db_slot:
+                    db_slot.name = slot_in.name
+                    db_slot.default_time = slot_in.default_time
+                    db_slot.order = idx
+                else:
+                    db_slot = HabitSlot(habit_id=habit.id, name=slot_in.name, default_time=slot_in.default_time, order=idx)
+                    db.add(db_slot)
+                incoming.append(db_slot)
+            # delete removed
+            to_delete = [s for s in habit.slots if s not in incoming]
+            for s in to_delete:
+                db.delete(s)
+        db.commit()
+        db.refresh(habit)
+        return habit
+    except Exception as e:
+        db.rollback()
+        with open("app_errors.log", "a", encoding="utf-8") as logf:
+            import traceback
+            logf.write(f"[{datetime.now().isoformat()}] [UPDATE_HABIT ERROR] {str(e)}\n{traceback.format_exc()}\n")
+        return SecureErrorResponse.internal_server_error("Failed to update habit")
 
 @app.delete('/api/habits/{habit_id}', status_code=204)
 def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
