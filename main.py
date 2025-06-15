@@ -32,8 +32,15 @@ from slowapi.errors import RateLimitExceeded
 import json
 from fastapi import Cookie
 from fastapi.responses import Response
+import os
+from dotenv import load_dotenv
 
 app = FastAPI()
+
+# Load environment variables from .env file
+load_dotenv()
+
+APP_ENV = os.getenv("APP_ENV", "development")
 
 # Initialize slowapi Limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -131,7 +138,19 @@ app.add_middleware(
 )
 
 Base = declarative_base()
-db_engine = create_engine("sqlite:///./todo_app.db", connect_args={"check_same_thread": False})
+
+# Database configuration
+if APP_ENV == "production":
+    POSTGRES_USER = os.getenv("POSTGRES_USER")
+    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+    POSTGRES_DB = os.getenv("POSTGRES_DB")
+    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+    POSTGRES_URL = f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+    db_engine = create_engine(POSTGRES_URL, pool_pre_ping=True)
+else:
+    db_engine = create_engine("sqlite:///./todo_app.db", connect_args={"check_same_thread": False})
+
 SessionLocal = sessionmaker(bind=db_engine, autoflush=False, autocommit=False)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -2014,6 +2033,13 @@ def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get
             import traceback
             logf.write(f"[{datetime.now().isoformat()}] [UPDATE_HABIT ERROR] {str(e)}\n{traceback.format_exc()}\n")
         return SecureErrorResponse.internal_server_error("Failed to update habit")
+
+@app.get('/api/habits/{habit_id}', response_model=HabitResponse)
+def get_habit_by_id(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
+    if not habit:
+        return SecureErrorResponse.not_found_error('Habit not found')
+    return habit
 
 @app.delete('/api/habits/{habit_id}', status_code=204)
 def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
