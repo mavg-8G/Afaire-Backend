@@ -707,6 +707,7 @@ class HistoryCreate(BaseModel):
     
 # Habit Schemas
 class HabitSlotCreate(BaseModel):
+    id: Optional[int] = None  # Optional ID field for existing slots
     name: str
     default_time: Optional[str] = None
 
@@ -1981,14 +1982,17 @@ def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get
             existing = {slot.id: slot for slot in habit.slots}
             incoming = []
             for idx, slot_in in enumerate(habit_in.slots):
-                # match by name if id not provided
+                # match by name and default_time
                 db_slot = None
                 for s in habit.slots:
                     if slot_in.name == s.name and slot_in.default_time == s.default_time:
                         db_slot = s
                         break
-                if slot_in.name and hasattr(slot_in, 'id') and slot_in.id and slot_in.id in existing:
+                
+                # If we have an explicit ID and it exists, use that slot
+                if hasattr(slot_in, 'id') and slot_in.id and slot_in.id in existing:
                     db_slot = existing[slot_in.id]
+                
                 if db_slot:
                     db_slot.name = slot_in.name
                     db_slot.default_time = slot_in.default_time
@@ -2057,6 +2061,11 @@ def list_habit_completions(habit_id: Optional[int] = None, slot_id: Optional[int
 
 @app.put('/api/habit_completions/{completion_id}', response_model=HabitCompletionResponse)
 def update_habit_completion(completion_id: int, completion_in: HabitCompletionUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Update a habit completion (toggle completed status).
+    This endpoint is used by the frontend's toggleHabitSlotCompletion function to set 
+    a completion record to true or false, rather than fully deleting it.
+    """
     comp = db.query(HabitCompletion).join(Habit).filter(HabitCompletion.id == completion_id, Habit.user_id == current_user.id).first()
     if not comp:
         return SecureErrorResponse.not_found_error("Completion not found")
@@ -2066,7 +2075,7 @@ def update_habit_completion(completion_id: int, completion_in: HabitCompletionUp
     return comp
 
 @app.delete('/api/habit_completions/{completion_id}', status_code=204)
-def delete_habit_completions(completion_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_habit_completion(completion_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     comp = db.query(HabitCompletion).join(Habit).filter(HabitCompletion.id == completion_id, Habit.user_id == current_user.id).first()
     if not comp:
         return SecureErrorResponse.not_found_error("Completion not found")
