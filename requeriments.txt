@@ -12,3 +12,4 @@ email-validator
 slowapi
 alembic
 python-dotenv
+psycopg2-binary
