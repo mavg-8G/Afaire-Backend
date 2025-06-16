@@ -222,9 +222,11 @@ class Activity(Base):
     day_of_month = Column(Integer, nullable=True)
     notes = Column(Text, nullable=True)
     mode = Column(SqlEnum(CategoryMode), nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     category = relationship("Category")
     responsibles = relationship("User", secondary=activity_user, backref="activities")
     todos = relationship("Todo", back_populates="activity", cascade="all, delete-orphan", single_parent=True)
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
 
 class ActivityOccurrence(Base):
     __tablename__ = 'activity_occurrences'
@@ -491,6 +493,7 @@ class ActivityResponse(BaseModel):
     notes: Optional[str]
     mode: CategoryMode
     responsible_ids: List[int]
+    created_by_user_id: int
 
     # Pydantic V2: enable model to read from ORM objects
     model_config = ConfigDict(from_attributes=True)
@@ -1232,8 +1235,12 @@ def delete_category(category_id: int, db: Session = Depends(get_db), current_use
         return handle_database_error(e)
 
 @app.get("/activities", response_model=List[ActivityResponse])
-def get_activities(db: Session = Depends(get_db)):
-    activities = db.query(Activity).all()
+def get_activities(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Filter activities: only return activities where the current user is responsible or is the creator
+    activities = db.query(Activity).filter(
+        (Activity.created_by_user_id == current_user.id) | 
+        Activity.responsibles.any(User.id == current_user.id)
+    ).all()
     # Map responsibles to responsible_ids
     return [
         ActivityResponse(
@@ -1248,13 +1255,14 @@ def get_activities(db: Session = Depends(get_db)):
             day_of_month=a.day_of_month,
             notes=a.notes,
             mode=a.mode,
-            responsible_ids=[u.id for u in a.responsibles]
+            responsible_ids=[u.id for u in a.responsibles],
+            created_by_user_id=a.created_by_user_id
         )
         for a in activities
     ]
 
 @app.post("/activities")
-def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
+def create_activity(activity: ActivityCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Additional server-side validation
         if not activity.title.strip():
@@ -1274,17 +1282,23 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         if activity.mode not in [category.mode, CategoryMode.both]:
             if category.mode != CategoryMode.both:
                 return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
-        
-        # Verify all responsible users exist
+          # Verify all responsible users exist and ensure current user is included
         existing_users = []
-        if activity.responsible_ids:
-            unique_ids = list(set(activity.responsible_ids))
-            if len(unique_ids) != len(activity.responsible_ids):
-                return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
+        responsible_ids = activity.responsible_ids or []
+        
+        # Ensure current user is in responsible_ids
+        if current_user.id not in responsible_ids:
+            responsible_ids.append(current_user.id)
+        
+        if responsible_ids:
+            unique_ids = list(set(responsible_ids))
             existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
             if len(existing_users) != len(unique_ids):
                 missing_ids = set(unique_ids) - {user.id for user in existing_users}
                 return SecureErrorResponse.not_found_error(f"Users not found: {list(missing_ids)}")
+        else:
+            # If no responsible users specified, make current user responsible
+            existing_users = [current_user]
         
         # Validate repeat mode logic
         if activity.repeat_mode == RepeatMode.weekly:
@@ -1311,8 +1325,7 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         # Validate todos
         if len(activity.todos) > 50:
             return SecureErrorResponse.validation_error("Too many todos (maximum 50 per activity)")
-        
-        # Create the activity
+          # Create the activity
         db_activity = Activity(
             title=activity.title.strip(),
             start_date=activity.start_date,
@@ -1323,7 +1336,8 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
             days_of_week=','.join(activity.days_of_week or []),
             day_of_month=activity.day_of_month,
             notes=activity.notes.strip() if activity.notes else None,
-            mode=activity.mode
+            mode=activity.mode,
+            created_by_user_id=current_user.id
         )
         
         # Assign responsible users
@@ -1359,7 +1373,7 @@ def create_activity(activity: ActivityCreate, db: Session = Depends(get_db)):
         return handle_database_error(e)
 
 @app.get("/activities/{activity_id}", response_model=ActivityResponse)
-def get_activity(activity_id: int, db: Session = Depends(get_db)):
+def get_activity(activity_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         # Validate activity_id
         if activity_id <= 0:
@@ -1368,6 +1382,10 @@ def get_activity(activity_id: int, db: Session = Depends(get_db)):
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
+        
+        # Authorization: Only responsible users or creator can view
+        if current_user not in activity.responsibles and activity.created_by_user_id != current_user.id:
+            return SecureErrorResponse.authorization_error("Not authorized to view this activity")
         
         return ActivityResponse(
             id=activity.id,
@@ -1381,7 +1399,8 @@ def get_activity(activity_id: int, db: Session = Depends(get_db)):
             day_of_month=activity.day_of_month,
             notes=activity.notes,
             mode=activity.mode,
-            responsible_ids=[u.id for u in activity.responsibles]
+            responsible_ids=[u.id for u in activity.responsibles],
+            created_by_user_id=activity.created_by_user_id
         )
     
     except Exception as e:
@@ -1395,9 +1414,8 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             return SecureErrorResponse.validation_error("Invalid activity ID")
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
-            return SecureErrorResponse.not_found_error("Activity not found")
-        # Authorization: Only responsible users can update (admin check removed)
-        if current_user not in activity.responsibles:
+            return SecureErrorResponse.not_found_error("Activity not found")        # Authorization: Only responsible users or creator can update
+        if current_user not in activity.responsibles and activity.created_by_user_id != current_user.id:
             return SecureErrorResponse.authorization_error("Not authorized to update this activity")
         update_data = activity_update.model_dump(exclude_unset=True)
         # Additional validation for updated fields
@@ -1453,21 +1471,28 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 update_data["days_of_week"] = ",".join(update_data["days_of_week"])
         # Sanitize notes if being updated
         if "notes" in update_data and update_data["notes"]:
-            update_data["notes"] = update_data["notes"].strip()
-        # Handle responsible_ids separately
+            update_data["notes"] = update_data["notes"].strip()        # Handle responsible_ids separately
         if "responsible_ids" in update_data:
             responsible_ids = update_data.pop("responsible_ids")
             if responsible_ids:
                 unique_ids = list(set(responsible_ids))
-                if len(unique_ids) != len(responsible_ids):
-                    return SecureErrorResponse.validation_error("Duplicate user IDs found in responsible_ids")
+                
+                # Prevent creator from being removed from responsible_ids
+                if activity.created_by_user_id not in unique_ids:
+                    unique_ids.append(activity.created_by_user_id)
+                
                 existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
                 if len(existing_users) != len(unique_ids):
                     missing_ids = set(unique_ids) - {user.id for user in existing_users}
                     return SecureErrorResponse.not_found_error(f"Users not found: {list(missing_ids)}")
                 activity.responsibles = existing_users
             else:
-                activity.responsibles = []
+                # Even if trying to clear responsible_ids, creator must remain
+                creator = db.query(User).filter(User.id == activity.created_by_user_id).first()
+                if creator:
+                    activity.responsibles = [creator]
+                else:
+                    return SecureErrorResponse.not_found_error("Activity creator not found")
         # Apply other updates
         for key, value in update_data.items():
             setattr(activity, key, value)
