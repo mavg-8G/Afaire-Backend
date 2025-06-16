@@ -153,7 +153,10 @@ else:
 
 SessionLocal = sessionmaker(bind=db_engine, autoflush=False, autocommit=False)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["argon2"],
+    deprecated="auto"  # bcrypt is now marked deprecated
+)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
