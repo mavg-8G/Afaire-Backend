@@ -1396,8 +1396,8 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
-        # Authorization: Only responsible users or admins can update
-        if current_user not in activity.responsibles and not current_user.is_admin:
+        # Authorization: Only responsible users can update (admin check removed)
+        if current_user not in activity.responsibles:
             return SecureErrorResponse.authorization_error("Not authorized to update this activity")
         update_data = activity_update.model_dump(exclude_unset=True)
         # Additional validation for updated fields
@@ -1795,9 +1795,9 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
         if not todo:
             return SecureErrorResponse.not_found_error("Todo not found")
 
-        # Authorization: Only responsible users or admins can update
+        # Authorization: Only responsible users can update (admin check removed)
         activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(joinedload(Activity.responsibles)).first()
-        if current_user not in activity.responsibles and not current_user.is_admin:
+        if current_user not in activity.responsibles:
             return SecureErrorResponse.authorization_error("Not authorized to update this todo")
         
         update_data = todo_update.model_dump(exclude_unset=True)
