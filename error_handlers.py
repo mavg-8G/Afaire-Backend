@@ -3,7 +3,7 @@ Error handling utilities for secure error responses and logging
 """
 import logging
 import traceback
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -22,6 +22,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from fastapi import Request as RequestType
+else:
+    RequestType = object
 
 
 class ErrorCategories:
@@ -48,7 +53,7 @@ class SecureErrorResponse:
     def log_detailed_error(
         error_id: str,
         error: Exception,
-        request: Request = None,
+        request: Optional["RequestType"] = None,
         user_id: Optional[int] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ):
@@ -241,7 +246,7 @@ class SecureErrorResponse:
         )
 
 
-def handle_database_error(error: SQLAlchemyError, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_database_error(error: SQLAlchemyError, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle database errors securely"""
     error_id = SecureErrorResponse.generate_error_id()
     
@@ -267,7 +272,7 @@ def handle_database_error(error: SQLAlchemyError, request: Request = None, user_
     return SecureErrorResponse.database_error("Database operation failed", error_id)
 
 
-def handle_validation_error(error: ValidationError, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_validation_error(error: ValidationError, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle Pydantic validation errors securely"""
     error_id = SecureErrorResponse.generate_error_id()
     
@@ -287,7 +292,7 @@ def handle_validation_error(error: ValidationError, request: Request = None, use
     return SecureErrorResponse.validation_error("Invalid input data provided", error_id)
 
 
-def handle_generic_exception(error: Exception, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_generic_exception(error: Exception, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle any unexpected exceptions securely"""
     error_id = SecureErrorResponse.generate_error_id()
     

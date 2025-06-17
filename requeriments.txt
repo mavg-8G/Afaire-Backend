@@ -14,3 +14,4 @@ alembic
 python-dotenv
 psycopg2-binary
 bcrypt==4.2.1
+python-dotenv
