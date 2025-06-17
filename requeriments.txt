@@ -5,7 +5,7 @@ pytest
 pytest-asyncio
 httpx
 python-multipart
-passlib[bcrypt]
+passlib[argon2]
 pydantic
 bleach
 email-validator
@@ -13,6 +13,3 @@ slowapi
 alembic
 python-dotenv
 psycopg2-binary
-bcrypt==4.2.1
-python-dotenv
-passlib[argon2]
