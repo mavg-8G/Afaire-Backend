@@ -827,28 +827,43 @@ def record_history(db: Session, user_id: int, action: str):
 @limiter.limit("5/minute")
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     try:
+        # Log login attempt with sanitized username
+        log_entry = f"[{datetime.now().isoformat()}] [LOGIN] Attempt with username: '{sanitize_string(form_data.username, ValidationConstants.MAX_USERNAME_LENGTH).lower()}'"
+        with open("app_errors.log", "a", encoding="utf-8") as logf:
+            logf.write(log_entry + "\n")
+
         # Sanitize input
         username = sanitize_string(form_data.username, ValidationConstants.MAX_USERNAME_LENGTH).lower()
         password = form_data.password
 
         # Additional validation
         if not username:
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN VALIDATION] Empty username input\n")
             return SecureErrorResponse.validation_error("Invalid credentials")
         if not password:
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN VALIDATION] Empty password for username: '{username}'\n")
             return SecureErrorResponse.validation_error("Invalid credentials")
 
         # Validate username format
         try:
             validate_username(username)
         except ValueError:
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN AUTH] Invalid username format: '{username}'\n")
             return SecureErrorResponse.authentication_error("Invalid credentials")
 
         user = db.query(User).filter(User.username == username).first()
         if not user:
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN AUTH] User not found: '{username}'\n")
             return SecureErrorResponse.authentication_error("Invalid credentials")
 
         password_valid = pwd_context.verify(password, user.hashed_password)
         if not password_valid:
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN AUTH] Invalid password for user_id: {user.id}\n")
             return SecureErrorResponse.authentication_error("Invalid credentials")
 
         access_token = create_access_token(data={"sub": str(user.id)})
@@ -867,12 +882,14 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             db.commit()
         except Exception as token_db_error:
             db.rollback()
-            error_id = SecureErrorResponse.generate_error_id()
-            SecureErrorResponse.log_detailed_error(
-                error_id=error_id,
-                error=token_db_error,
-                additional_context={"operation": "token_creation", "user_id": user.id}
-            )
+            with open("app_errors.log", "a", encoding="utf-8") as logf:
+                logf.write(f"[{datetime.now().isoformat()}] [LOGIN DB ERROR] {str(token_db_error)}\n")
+             error_id = SecureErrorResponse.generate_error_id()
+             SecureErrorResponse.log_detailed_error(
+                 error_id=error_id,
+                 error=token_db_error,
+                 additional_context={"operation": "token_creation", "user_id": user.id}
+             )
             return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
         response = JSONResponse(
@@ -892,6 +909,9 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             samesite="none",
             max_age=60*60*24*7  # 7 days
         )
+        # Log successful token issuance
+        with open("app_errors.log", "a", encoding="utf-8") as logf:
+            logf.write(f"[{datetime.now().isoformat()}] [LOGIN] Tokens issued to user_id: {user.id}\n")
         return response
 
     except Exception as e:
@@ -1987,12 +2007,12 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db), current_use
 
 
 # Habit Endpoints
-@app.get('/api/habits', response_model=List[HabitResponse])
+@app.get('/habits', response_model=List[HabitResponse])
 def get_habits_with_slots(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
     return habits
 
-@app.post('/api/habits', response_model=HabitResponse)
+@app.post('/habits', response_model=HabitResponse)
 def create_habit(habit_in: HabitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         db_habit = Habit(user_id=current_user.id, name=habit_in.name, icon_name=habit_in.icon_name)
@@ -2012,7 +2032,7 @@ def create_habit(habit_in: HabitCreate, db: Session = Depends(get_db), current_u
             logf.write(f"[{datetime.now().isoformat()}] [CREATE_HABIT ERROR] {str(e)}\n{traceback.format_exc()}\n")
         return SecureErrorResponse.internal_server_error("Failed to create habit")
 
-@app.put('/api/habits/{habit_id}', response_model=HabitResponse)
+@app.put('/habits/{habit_id}', response_model=HabitResponse)
 def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
@@ -2062,14 +2082,14 @@ def update_habit(habit_id: int, habit_in: HabitUpdate, db: Session = Depends(get
             logf.write(f"[{datetime.now().isoformat()}] [UPDATE_HABIT ERROR] {str(e)}\n{traceback.format_exc()}\n")
         return SecureErrorResponse.internal_server_error("Failed to update habit")
 
-@app.get('/api/habits/{habit_id}', response_model=HabitResponse)
+@app.get('/habits/{habit_id}', response_model=HabitResponse)
 def get_habit_by_id(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
     if not habit:
         return SecureErrorResponse.not_found_error('Habit not found')
     return habit
 
-@app.delete('/api/habits/{habit_id}', status_code=204)
+@app.delete('/habits/{habit_id}', status_code=204)
 def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
     if not habit:
@@ -2079,7 +2099,7 @@ def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: Use
     return Response(status_code=204)
 
 # HabitCompletion Endpoints
-@app.post('/api/habit_completions', response_model=HabitCompletionResponse)
+@app.post('/habit_completions', response_model=HabitCompletionResponse)
 def create_habit_completion(completion_in: HabitCompletionCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # Validate habit ownership
     habit = db.query(Habit).filter(Habit.id == completion_in.habit_id, Habit.user_id == current_user.id).first()
@@ -2104,7 +2124,7 @@ def create_habit_completion(completion_in: HabitCompletionCreate, db: Session = 
     db.refresh(db_completion)
     return db_completion
 
-@app.get('/api/habit_completions', response_model=List[HabitCompletionResponse])
+@app.get('/habit_completions', response_model=List[HabitCompletionResponse])
 def list_habit_completions(habit_id: Optional[int] = None, slot_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     query = db.query(HabitCompletion).join(Habit).filter(Habit.user_id == current_user.id)
     if habit_id is not None:
@@ -2113,7 +2133,7 @@ def list_habit_completions(habit_id: Optional[int] = None, slot_id: Optional[int
         query = query.filter(HabitCompletion.slot_id == slot_id)
     return query.all()
 
-@app.put('/api/habit_completions/{completion_id}', response_model=HabitCompletionResponse)
+@app.put('/habit_completions/{completion_id}', response_model=HabitCompletionResponse)
 def update_habit_completion(completion_id: int, completion_in: HabitCompletionUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Update a habit completion (toggle completed status).
@@ -2128,7 +2148,7 @@ def update_habit_completion(completion_id: int, completion_in: HabitCompletionUp
     db.refresh(comp)
     return comp
 
-@app.delete('/api/habit_completions/{completion_id}', status_code=204)
+@app.delete('/habit_completions/{completion_id}', status_code=204)
 def delete_habit_completion(completion_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     comp = db.query(HabitCompletion).join(Habit).filter(HabitCompletion.id == completion_id, Habit.user_id == current_user.id).first()
     if not comp:
