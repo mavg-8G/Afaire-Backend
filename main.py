@@ -50,8 +50,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Custom exception handlers for comprehensive error handling
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handle Pydantic validation errors with secure error messages and log request body/query params"""
-    # Log with full request context
     SecureErrorResponse.log_detailed_error(
         error_id=SecureErrorResponse.generate_error_id(),
         error=exc,
@@ -61,18 +59,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "validation_errors": exc.errors()
         }
     )
-    return handle_validation_error(exc, request)
+    # Convert RequestValidationError to ValidationError for handler
+    return handle_validation_error(ValidationError(errors=exc.errors(), model=None), request)
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
-    """Handle ValueError exceptions from custom validation"""
     SecureErrorResponse.log_detailed_error(
         error_id=SecureErrorResponse.generate_error_id(),
         error=exc,
         request=request,
         additional_context={"error_category": "value_error"}
     )
-    return handle_validation_error(exc, request)
+    # Wrap ValueError in ValidationError for handler
+    return handle_validation_error(ValidationError(errors=[{"msg": str(exc)}], model=None), request)
 
 @app.exception_handler(ValidationError)
 async def pydantic_validation_error_handler(request: Request, exc: ValidationError):
@@ -1070,7 +1069,7 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
         if user_update.username is not None:
             user.username = user_update.username.lower()  # Store username in lowercase
         if user_update.password is not None:
-            user.hashed_password = get_password_hash(user_update.password)
+            setattr(user, 'hashed_password', get_password_hash(user_update.password))
         if user_update.is_admin is not None:
             user.is_admin = user_update.is_admin
         
@@ -1109,7 +1108,7 @@ def change_password(request: Request, user_id: int, req: ChangePasswordRequest, 
         except ValueError as e:
             return SecureErrorResponse.validation_error(str(e))
         
-        user.hashed_password = get_password_hash(req.new_password)
+        setattr(user, 'hashed_password', get_password_hash(req.new_password))
         # Invalidate all refresh tokens for this user
         db.query(RefreshToken).filter_by(user_id=user_id, revoked=False).update({"revoked": True})
         db.commit()
