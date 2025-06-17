@@ -884,12 +884,12 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             db.rollback()
             with open("app_errors.log", "a", encoding="utf-8") as logf:
                 logf.write(f"[{datetime.now().isoformat()}] [LOGIN DB ERROR] {str(token_db_error)}\n")
-             error_id = SecureErrorResponse.generate_error_id()
-             SecureErrorResponse.log_detailed_error(
-                 error_id=error_id,
-                 error=token_db_error,
-                 additional_context={"operation": "token_creation", "user_id": user.id}
-             )
+                error_id = SecureErrorResponse.generate_error_id()
+                SecureErrorResponse.log_detailed_error(
+                    error_id=error_id,
+                    error=token_db_error,
+                    additional_context={"operation": "token_creation", "user_id": user.id}
+                )
             return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
         response = JSONResponse(
