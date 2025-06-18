@@ -3,7 +3,7 @@ from main import SessionLocal, User, get_password_hash
 def create_user():
     db = SessionLocal()
     try:
-        username = "juntsper"
+        username = "juntsPer"
         existing = db.query(User).filter(User.username == username).first()
         if existing:
             print("User already exists.")

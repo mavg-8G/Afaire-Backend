@@ -3,7 +3,7 @@ Error handling utilities for secure error responses and logging
 """
 import logging
 import traceback
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -22,6 +22,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from fastapi import Request as RequestType
+else:
+    RequestType = object
 
 
 class ErrorCategories:
@@ -48,7 +53,7 @@ class SecureErrorResponse:
     def log_detailed_error(
         error_id: str,
         error: Exception,
-        request: Request = None,
+        request: Optional["RequestType"] = None,
         user_id: Optional[int] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ):
@@ -65,35 +70,40 @@ class SecureErrorResponse:
         
         if request:
             error_details.update({
-                "request_method": request.method,
-                "request_url": str(request.url),
-                "request_headers": dict(request.headers),
-                "client_ip": getattr(request.client, 'host', 'unknown') if request.client else 'unknown'
+                "request_method": getattr(request, 'method', None),
+                "request_url": str(getattr(request, 'url', '')),
+                "request_headers": dict(getattr(request, 'headers', {})),
+                "client_ip": getattr(getattr(request, 'client', None), 'host', 'unknown') if getattr(request, 'client', None) else 'unknown'
             })
             # Try to log query params
             try:
-                error_details["query_params"] = dict(request.query_params)
+                error_details["query_params"] = dict(getattr(request, 'query_params', {}))
             except Exception:
                 error_details["query_params"] = "<unavailable>"
             # Try to log request body for POST/PUT/PATCH
-            if request.method in ("POST", "PUT", "PATCH"):
+            if getattr(request, 'method', None) in ("POST", "PUT", "PATCH"):
                 try:
-                    # Read body safely (request body can only be read once, so this is best-effort)
                     import asyncio
                     body = None
                     if hasattr(request, "_body") and request._body is not None:
                         body = request._body
-                    else:
+                    elif hasattr(request, "body"):
                         body = asyncio.run(request.body())
-                    # Try to decode as utf-8 and parse as JSON
-                    import json
-                    try:
-                        error_details["request_body"] = json.loads(body.decode("utf-8"))
-                    except Exception:
-                        error_details["request_body"] = body.decode("utf-8", errors="replace")
+                    if body is not None:
+                        import json
+                        try:
+                            error_details["request_body"] = json.loads(body.decode("utf-8"))
+                        except Exception:
+                            error_details["request_body"] = body.decode("utf-8", errors="replace")
                 except Exception:
                     error_details["request_body"] = "<unavailable>"
-        
+        # Write detailed error info to app_errors.log
+        try:
+            with open('app_errors.log', 'a', encoding='utf-8') as f:
+                import json
+                f.write(json.dumps(error_details, ensure_ascii=False, indent=2) + '\n')
+        except Exception as log_exc:
+            logger.error(f"Failed to write detailed error to app_errors.log: {log_exc}")
         logger.error(f"Detailed error logged: {error_details}")
     
     @staticmethod
@@ -241,7 +251,7 @@ class SecureErrorResponse:
         )
 
 
-def handle_database_error(error: SQLAlchemyError, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_database_error(error: SQLAlchemyError, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle database errors securely"""
     error_id = SecureErrorResponse.generate_error_id()
     
@@ -267,7 +277,7 @@ def handle_database_error(error: SQLAlchemyError, request: Request = None, user_
     return SecureErrorResponse.database_error("Database operation failed", error_id)
 
 
-def handle_validation_error(error: ValidationError, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_validation_error(error: ValidationError, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle Pydantic validation errors securely"""
     error_id = SecureErrorResponse.generate_error_id()
     
@@ -287,7 +297,7 @@ def handle_validation_error(error: ValidationError, request: Request = None, use
     return SecureErrorResponse.validation_error("Invalid input data provided", error_id)
 
 
-def handle_generic_exception(error: Exception, request: Request = None, user_id: Optional[int] = None) -> JSONResponse:
+def handle_generic_exception(error: Exception, request: Optional["RequestType"] = None, user_id: Optional[int] = None) -> JSONResponse:
     """Handle any unexpected exceptions securely"""
     error_id = SecureErrorResponse.generate_error_id()
     
