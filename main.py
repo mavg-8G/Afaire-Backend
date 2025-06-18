@@ -287,8 +287,8 @@ class HabitSlot(Base):
 class HabitCompletion(Base):
     __tablename__ = 'habit_completions'
     id = Column(Integer, primary_key=True)
-    habit_id = Column(Integer, ForeignKey('habits.id'), nullable=False)
-    slot_id = Column(Integer, ForeignKey('habit_slots.id'), nullable=False)
+    habit_id = Column(Integer, ForeignKey('habits.id', ondelete='CASCADE'), nullable=False)
+    slot_id = Column(Integer, ForeignKey('habit_slots.id', ondelete='CASCADE'), nullable=False)
     completion_date = Column(DateTime, nullable=False)
     is_completed = Column(Boolean, default=False)
     __table_args__ = (UniqueConstraint('habit_id', 'slot_id', 'completion_date', name='_habit_slot_date_uc'),)
@@ -2091,12 +2091,31 @@ def get_habit_by_id(habit_id: int, db: Session = Depends(get_db), current_user: 
 
 @app.delete('/habits/{habit_id}', status_code=204)
 def delete_habit(habit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
-    if not habit:
-        return SecureErrorResponse.not_found_error('Habit not found')
-    db.delete(habit)
-    db.commit()
-    return Response(status_code=204)
+    try:
+        habit = db.query(Habit).filter(Habit.id == habit_id, Habit.user_id == current_user.id).first()
+        if not habit:
+            return SecureErrorResponse.not_found_error('Habit not found')
+        
+        # Delete habit completions first (if cascade doesn't work)
+        db.query(HabitCompletion).filter(HabitCompletion.habit_id == habit_id).delete()
+        
+        # Delete habit slots (they should cascade, but being explicit)
+        db.query(HabitSlot).filter(HabitSlot.habit_id == habit_id).delete()
+        
+        # Delete the habit itself
+        db.delete(habit)
+        db.commit()
+        
+        return Response(status_code=204)
+    except Exception as e:
+        db.rollback()
+        error_id = SecureErrorResponse.generate_error_id()
+        SecureErrorResponse.log_detailed_error(
+            error_id=error_id,
+            error=e,
+            additional_context={"operation": "delete_habit", "habit_id": habit_id}
+        )
+        return SecureErrorResponse.internal_server_error("Failed to delete habit")
 
 # HabitCompletion Endpoints
 @app.post('/habit_completions', response_model=HabitCompletionResponse)
