@@ -1256,16 +1256,21 @@ def delete_category(category_id: int, db: Session = Depends(get_db), current_use
         db.rollback()
         return handle_database_error(e)
 
-@app.get("/activities", response_model=List[ActivityResponse])
+@app.get("/activities", response_model=List[schemas.ActivityResponse])
 def get_activities(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Filter activities: only return activities where the current user is responsible or is the creator
-    activities = db.query(Activity).filter(
-        (Activity.created_by_user_id == current_user.id) | 
-        Activity.responsibles.any(User.id == current_user.id)
-    ).all()
-    # Map responsibles to responsible_ids
+    """
+    Retrieves activities where the user is an admin, the creator, or a responsible user.
+    """
+    if getattr(current_user, "is_admin", False):
+        activities = db.query(Activity).all()
+    else:
+        activities = db.query(Activity).filter(
+            (Activity.created_by_user_id == current_user.id) |
+            Activity.responsibles.any(User.id == current_user.id)
+        ).all()
+
     return [
-        ActivityResponse(
+        schemas.ActivityResponse(
             id=a.id,
             title=a.title,
             start_date=a.start_date,
@@ -1405,9 +1410,14 @@ def get_activity(activity_id: int, db: Session = Depends(get_db), current_user: 
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
         
-        # Authorization: Only responsible users or creator can view
-        if current_user not in activity.responsibles and activity.created_by_user_id != current_user.id:
-            return SecureErrorResponse.authorization_error("Not authorized to view this activity")
+        # Authorization: Only responsible users, creator, or admin can view
+        is_admin = getattr(current_user, "is_admin", False)
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_admin or is_creator or is_responsible):
+            # Return not found instead of authorization error to avoid leaking existence
+            return SecureErrorResponse.not_found_error("Activity not found")
         
         return ActivityResponse(
             id=activity.id,
@@ -1421,7 +1431,7 @@ def get_activity(activity_id: int, db: Session = Depends(get_db), current_user: 
             day_of_month=activity.day_of_month,
             notes=activity.notes,
             mode=activity.mode,
-            responsible_ids=[u.id for u in activity.responsibles],
+            responsible_ids=responsible_ids,
             created_by_user_id=activity.created_by_user_id
         )
     
@@ -1964,7 +1974,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     error_name, error_func = error_map.get(exc.status_code, ("internal_server_error", SecureErrorResponse.internal_server_error))
     # Return a consistent error format with detail
     return JSONResponse(
-        status_code=exc.status_code,
+        status_code=exc.status_code=exc.status_code,
         content={
             "error": error_name,
             "message": sanitized_detail,
