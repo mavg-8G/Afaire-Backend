@@ -4,6 +4,9 @@ from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
+import os
+from dotenv import load_dotenv
+import logging
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -13,6 +16,21 @@ config = context.config
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Load .env file
+load_dotenv()
+
+# Determine which DB URL to use
+app_env = os.getenv("APP_ENV", "development")
+if app_env == "production":
+    db_url = f"postgresql+psycopg2://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DB')}"
+else:
+    db_url = "sqlite:///./todo_app.db"
+
+# Set the sqlalchemy.url in the Alembic config
+config.set_main_option("sqlalchemy.url", db_url)
+
+logging.getLogger("alembic.env").info(f"Alembic will use database: {db_url} (APP_ENV={app_env})")
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -39,6 +57,7 @@ def run_migrations_offline() -> None:
 
     """
     url = config.get_main_option("sqlalchemy.url")
+    logging.getLogger("alembic.env").info(f"Alembic OFFLINE migration using database: {url}")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -57,6 +76,9 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
+    db_url = config.get_main_option("sqlalchemy.url")
+    logging.getLogger("alembic.env").info(f"Alembic ONLINE migration using database: {db_url}")
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
