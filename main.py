@@ -1256,7 +1256,7 @@ def delete_category(category_id: int, db: Session = Depends(get_db), current_use
         db.rollback()
         return handle_database_error(e)
 
-@app.get("/activities", response_model=List[schemas.ActivityResponse])
+@app.get("/activities", response_model=List[ActivityResponse])
 def get_activities(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Retrieves activities where the user is an admin, the creator, or a responsible user.
@@ -1270,7 +1270,7 @@ def get_activities(db: Session = Depends(get_db), current_user: User = Depends(g
         ).all()
 
     return [
-        schemas.ActivityResponse(
+        ActivityResponse(
             id=a.id,
             title=a.title,
             start_date=a.start_date,
@@ -1948,7 +1948,7 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with sanitized messages"""
+    """Handles HTTP exceptions with sanitized messages."""
     error_id = SecureErrorResponse.generate_error_id()
     SecureErrorResponse.log_detailed_error(
         error_id=error_id,
@@ -1962,6 +1962,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
     from error_handlers import sanitize_error_message
     sanitized_detail = sanitize_error_message(str(exc.detail))
+
     # Map status codes to error categories and error names
     error_map = {
         400: ("validation_error", SecureErrorResponse.validation_error),
@@ -1972,9 +1973,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         429: ("rate_limit_error", SecureErrorResponse.rate_limit_error),
     }
     error_name, error_func = error_map.get(exc.status_code, ("internal_server_error", SecureErrorResponse.internal_server_error))
+
     # Return a consistent error format with detail
     return JSONResponse(
-        status_code=exc.status_code=exc.status_code,
+        status_code=exc.status_code,
         content={
             "error": error_name,
             "message": sanitized_detail,
@@ -2012,8 +2014,6 @@ def delete_activity(activity_id: int, db: Session = Depends(get_db), current_use
     except Exception as e:
         db.rollback()
         return handle_database_error(e)
-
-
 
 # Habit Endpoints
 @app.get('/habits', response_model=List[HabitResponse])
