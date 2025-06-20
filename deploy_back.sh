@@ -11,4 +11,8 @@ git pull
 echo "Installing dependencies..."
 pip install -r requirements.txt
 
-#Think to use: gunicorn -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000 --workers 4
+# Restart the backend service
+echo "Restarting services..."
+sudo systemctl restart ToDoBackend.service
+sudo systemctl restart caddy-api.service
+sudo systemctl restart caddy.service
