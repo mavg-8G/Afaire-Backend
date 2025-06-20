@@ -950,7 +950,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             value=refresh_token,
             httponly=True,
             secure=True,
-            samesite="none",
+            samesite="lax",
             max_age=60*60*24*7  # 7 days
         )
         # Log successful token issuance
