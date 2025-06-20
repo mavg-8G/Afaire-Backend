@@ -9,6 +9,10 @@ from enum import Enum
 import re
 import html
 import bleach
+import hmac
+import hashlib
+import subprocess
+import os
 import logging
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref, joinedload
@@ -822,6 +826,47 @@ def record_history(db: Session, user_id: int, action: str):
     db.commit()
 
 # Routes
+@app.post("/webhook_backend_fastapi", status_code=200)
+async def github_webhook_back(request: Request):
+    body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    GITHUB_SECRET = os.getenv("GITHUB_SECRET")
+    if GITHUB_SECRET:
+        # Ensure GITHUB_SECRET is bytes
+        secret_bytes = GITHUB_SECRET.encode() if isinstance(GITHUB_SECRET, str) else GITHUB_SECRET
+        mac = hmac.new(secret_bytes, msg=body, digestmod=hashlib.sha256)
+        expected_sig = "sha256=" + mac.hexdigest()
+        if not hmac.compare_digest(expected_sig, signature or ""):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        subprocess.check_call(["/bin/bash", "./deploy_back.sh"])
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Deploy failed: {e}")
+
+    return {"status": "success"}
+
+@app.post("/webhook_frontend_nextjs", status_code=200)
+async def github_webhook_front(request: Request):
+    body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    GITHUB_SECRET = os.getenv("GITHUB_SECRET")
+    if GITHUB_SECRET:
+        # Ensure GITHUB_SECRET is bytes
+        secret_bytes = GITHUB_SECRET.encode() if isinstance(GITHUB_SECRET, str) else GITHUB_SECRET
+        mac = hmac.new(secret_bytes, msg=body, digestmod=hashlib.sha256)
+        expected_sig = "sha256=" + mac.hexdigest()
+        if not hmac.compare_digest(expected_sig, signature or ""):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        subprocess.check_call(["/bin/bash", "./deploy_back.sh"])
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Deploy failed: {e}")
+
+    return {"status": "success"}
+
+
 @app.post("/token")
 @limiter.limit("5/minute")
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
