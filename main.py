@@ -850,7 +850,7 @@ async def github_webhook_back(request: Request):
 async def github_webhook_front(request: Request):
     body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
-    GITHUB_SECRET = os.getenv("GITHUB_SECRET")
+    GITHUB_SECRET = os.getenv("GITHUB_SECRET_FRONT")
     if GITHUB_SECRET:
         # Ensure GITHUB_SECRET is bytes
         secret_bytes = GITHUB_SECRET.encode() if isinstance(GITHUB_SECRET, str) else GITHUB_SECRET
