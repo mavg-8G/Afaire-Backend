@@ -13,6 +13,5 @@ pip install -r requirements.txt
 
 # Restart the backend service
 echo "Restarting services..."
-sudo systemctl restart ToDoBackend.service
 sudo systemctl restart caddy-api.service
 sudo systemctl restart caddy.service
