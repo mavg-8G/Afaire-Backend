@@ -1484,22 +1484,35 @@ def get_activity(activity_id: int, db: Session = Depends(get_db), current_user: 
         return handle_generic_exception(e)
 
 @app.put("/activities/{activity_id}")
-def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_activity(
+    activity_id: int,
+    activity_update: ActivityUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         # Validate activity_id
         if activity_id <= 0:
             return SecureErrorResponse.validation_error("Invalid activity ID")
         activity = db.query(Activity).filter(Activity.id == activity_id).first()
         if not activity:
-            return SecureErrorResponse.not_found_error("Activity not found")        # Authorization: Only responsible users or creator can update
-        if current_user not in activity.responsibles and activity.created_by_user_id != current_user.id:
+            return SecureErrorResponse.not_found_error("Activity not found")
+
+        # Authorization: Only the creator or a responsible user can update
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
             return SecureErrorResponse.authorization_error("Not authorized to update this activity")
+
         update_data = activity_update.model_dump(exclude_unset=True)
+
         # Additional validation for updated fields
         if "title" in update_data and update_data["title"]:
             if not update_data["title"].strip():
                 return SecureErrorResponse.validation_error("Activity title cannot be empty")
             update_data["title"] = update_data["title"].strip()
+
         # Validate category_id if being updated
         if "category_id" in update_data:
             category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
@@ -1509,6 +1522,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
             if new_mode not in [category.mode, CategoryMode.both]:
                 if category.mode != CategoryMode.both:
                     return SecureErrorResponse.validation_error("Activity mode must be compatible with category mode")
+
         # Convert start_date to UTC for consistency if being updated
         if "start_date" in update_data:
             start_date = update_data["start_date"]
@@ -1522,6 +1536,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 start_date_utc = start_date_utc.replace(tzinfo=timezone.utc)
             else:
                 start_date_utc = start_date_utc.astimezone(timezone.utc)
+
         # Validate end_date logic if being updated
         if "end_date" in update_data and update_data["end_date"]:
             end_date = update_data["end_date"]
@@ -1531,6 +1546,7 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 end_date_utc = end_date.astimezone(timezone.utc)
             if end_date_utc <= start_date_utc:
                 return SecureErrorResponse.validation_error("End date must be after start date")
+
         # Validate repeat mode logic
         if "repeat_mode" in update_data:
             repeat_mode = update_data["repeat_mode"]
@@ -1542,22 +1558,24 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                 day_of_month = update_data.get("day_of_month", activity.day_of_month)
                 if day_of_month is None:
                     return SecureErrorResponse.validation_error("day_of_month is required for monthly repeat mode")
+
         # Handle days_of_week conversion
         if "days_of_week" in update_data and update_data["days_of_week"] is not None:
             if isinstance(update_data["days_of_week"], list):
                 update_data["days_of_week"] = ",".join(update_data["days_of_week"])
+
         # Sanitize notes if being updated
         if "notes" in update_data and update_data["notes"]:
-            update_data["notes"] = update_data["notes"].strip()        # Handle responsible_ids separately
+            update_data["notes"] = update_data["notes"].strip()
+
+        # Handle responsible_ids separately
         if "responsible_ids" in update_data:
             responsible_ids = update_data.pop("responsible_ids")
             if responsible_ids:
                 unique_ids = list(set(responsible_ids))
-                
                 # Prevent creator from being removed from responsible_ids
                 if activity.created_by_user_id not in unique_ids:
                     unique_ids.append(activity.created_by_user_id)
-                
                 existing_users = db.query(User).filter(User.id.in_(unique_ids)).all()
                 if len(existing_users) != len(unique_ids):
                     missing_ids = set(unique_ids) - {user.id for user in existing_users}
@@ -1570,24 +1588,37 @@ def update_activity(activity_id: int, activity_update: ActivityUpdate, db: Sessi
                     activity.responsibles = [creator]
                 else:
                     return SecureErrorResponse.not_found_error("Activity creator not found")
+
         # Apply other updates
         for key, value in update_data.items():
             setattr(activity, key, value)
+
         db.commit()
         db.refresh(activity)
         return activity
+
     except Exception as e:
         db.rollback()
         return handle_database_error(e)
 
 @app.post("/activity-occurrences")
-def create_activity_occurrence(occurrence: ActivityOccurrenceCreate, db: Session = Depends(get_db)):
+def create_activity_occurrence(
+    occurrence: ActivityOccurrenceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Crear una nueva ocurrencia de actividad"""
     try:
         # Verify activity exists
         activity = db.query(Activity).filter(Activity.id == occurrence.activity_id).first()
         if not activity:
             return SecureErrorResponse.not_found_error("Activity not found")
+         # Authorization: Only creator or responsible user can create
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
+            return SecureErrorResponse.authorization_error("Not authorized to create an occurrence for this activity")
         # Additional validation for occurrence date: convert to UTC
         occ_date = occurrence.date
         if occ_date.tzinfo is None:
@@ -1654,7 +1685,12 @@ def get_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/activity-occurrences/{occurrence_id}")
-def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOccurrenceUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_activity_occurrence(
+    occurrence_id: int,
+    occurrence_update: ActivityOccurrenceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         # Validate occurrence_id
         if occurrence_id <= 0:
@@ -1664,11 +1700,17 @@ def update_activity_occurrence(occurrence_id: int, occurrence_update: ActivityOc
         if not occurrence:
             return SecureErrorResponse.not_found_error("Activity occurrence not found")
 
-        # Authorization: Only responsible users or admins can update
-        if current_user not in occurrence.activity.responsibles and not current_user.is_admin:
+
+        # Authorization: Only creator or responsible user can update
+        activity = occurrence.activity
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
             return SecureErrorResponse.authorization_error("Not authorized to update this occurrence")
 
         update_data = occurrence_update.model_dump(exclude_unset=True)
+        
         
         # Additional validation for date if being updated
         if "date" in update_data:
@@ -1726,7 +1768,11 @@ def delete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)
         return handle_database_error(e)
 
 @app.put("/activity-occurrences/{occurrence_id}/complete")
-def complete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_db)):
+def complete_activity_occurrence(
+    occurrence_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Mark an activity occurrence as complete"""
     try:
         # Validate occurrence_id
@@ -1736,6 +1782,14 @@ def complete_activity_occurrence(occurrence_id: int, db: Session = Depends(get_d
         occurrence = db.query(ActivityOccurrence).filter(ActivityOccurrence.id == occurrence_id).first()
         if not occurrence:
             return SecureErrorResponse.not_found_error("Activity occurrence not found")
+        
+        # Authorization: Only creator or responsible user can complete
+        activity = occurrence.activity
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
+            return SecureErrorResponse.authorization_error("Not authorized to complete this occurrence")
         
         # Mark as complete
         occurrence.complete = True
@@ -1887,7 +1941,12 @@ def get_todo(todo_id: int, db: Session = Depends(get_db)):
         return handle_generic_exception(e)
 
 @app.put("/todos/{todo_id}")
-def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_todo(
+    todo_id: int,
+    todo_update: TodoUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         # Validate todo_id
         if todo_id <= 0:
@@ -1897,9 +1956,12 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
         if not todo:
             return SecureErrorResponse.not_found_error("Todo not found")
 
-        # Authorization: Only responsible users can update (admin check removed)
+        # Authorization: Only creator or responsible user can update
         activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(joinedload(Activity.responsibles)).first()
-        if current_user not in activity.responsibles:
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
             return SecureErrorResponse.authorization_error("Not authorized to update this todo")
         
         update_data = todo_update.model_dump(exclude_unset=True)
@@ -1921,7 +1983,11 @@ def update_todo(todo_id: int, todo_update: TodoUpdate, db: Session = Depends(get
         return handle_database_error(e)
 
 @app.delete("/todos/{todo_id}")
-def delete_todo(todo_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_todo(
+    todo_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         # Validate todo_id
         if todo_id <= 0:
@@ -1931,8 +1997,12 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db), current_user: User 
         if not todo:
             return SecureErrorResponse.not_found_error("Todo not found")
 
-        # Authorization: Only responsible users or admins can delete
-        if current_user not in todo.activity.responsibles and not current_user.is_admin:
+        # Authorization: Only creator or responsible user can delete
+        activity = db.query(Activity).filter(Activity.id == todo.activity_id).options(joinedload(Activity.responsibles)).first()
+        is_creator = activity.created_by_user_id == current_user.id
+        responsible_ids = [u.id for u in activity.responsibles]
+        is_responsible = current_user.id in responsible_ids
+        if not (is_creator or is_responsible):
             return SecureErrorResponse.authorization_error("Not authorized to delete this todo")
         
         db.delete(todo)
