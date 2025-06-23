@@ -20,6 +20,3 @@ npm run build
 # Restart Service
 echo "Restarting services..."
 sudo systemctl restart ToDo.service
-sudo systemctl restart ToDoBackend.service
-sudo systemctl restart caddy-api.service
-sudo systemctl restart caddy.service
