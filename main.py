@@ -859,8 +859,7 @@ async def github_webhook_front(request: Request):
         if not hmac.compare_digest(expected_sig, signature or ""):
             raise HTTPException(status_code=403, detail="Invalid signature")
 
-    try:
-        subprocess.check_call(["/bin/bash", "./deploy_back.sh"])
+    try:   subprocess.check_call(["/bin/bash", "./deploy_front.sh"])
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Deploy failed: {e}")
 
