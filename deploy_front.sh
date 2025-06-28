@@ -9,14 +9,14 @@ cd ../studio/
 echo "Pulling latest code..."
 git pull
 
-# Install latest Node.js dependencies
-echo "Installing dependencies..."
-npm install
+# # Install latest Node.js dependencies
+# echo "Installing dependencies..."
+# npm install
 
-# Build the project
-echo "Building the project..."
-npm run build
+# # Build the project
+# echo "Building the project..."
+# npm run build
 
-# Restart Service
-echo "Restarting services..."
-sudo systemctl restart ToDo.service
+# # Restart Service
+# echo "Restarting services..."
+# sudo systemctl restart ToDo.service
