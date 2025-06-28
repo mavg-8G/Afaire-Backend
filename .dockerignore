@@ -1,0 +1,39 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# IDE settings
+.idea/
+.vscode/
+alembic/
+alembic.ini
+
+# Environment variables
+.env.*
+
+# SQLite database files
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# Tests (optional)
+tests/
+
+# Miscellaneous
+.DS_Store
