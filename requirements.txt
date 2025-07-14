@@ -6,6 +6,7 @@ pytest-asyncio
 httpx
 python-multipart
 passlib[argon2]
+python-jose
 pydantic
 bleach
 email-validator

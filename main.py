@@ -186,10 +186,15 @@ class CategoryMode(str, Enum):
     work = "work"
     both = "both"
 
+class EstadoTarea(str, Enum):
+    pendiente = "Pendiente"
+    completada = "Completada"
+
 class RepeatMode(str, Enum):
     none = "none"
     daily = "daily"
     weekly = "weekly"
+    biweekly = "biweekly"
     monthly = "monthly"
 
 # Association tables
@@ -297,6 +302,24 @@ class HabitCompletion(Base):
     __table_args__ = (UniqueConstraint('habit_id', 'slot_id', 'completion_date', name='_habit_slot_date_uc'),)
     habit = relationship('Habit', backref='completions')
     slot = relationship('HabitSlot')
+
+class TareaRecurrente(Base):
+    __tablename__ = "tareas_recurrentes"
+    id = Column(Integer, primary_key=True)
+    item = Column(String, nullable=False)         # Ej: "Piso"
+    accion = Column(String, nullable=False)       # Ej: "Barrer"
+    area = Column(String, nullable=False)         # Ej: "Cocina"
+    frecuencia = Column(SqlEnum(RepeatMode), nullable=False)
+    dias_semana = Column(String, nullable=False)  # Ej: "miércoles,sábado,domingo"
+
+class TareaAsignada(Base):
+    __tablename__ = "tareas_asignadas"
+    id = Column(Integer, primary_key=True)
+    tarea_recurrente_id = Column(Integer, ForeignKey("tareas_recurrentes.id"), nullable=False)
+    responsibles = relationship("User", secondary=activity_user, backref="activities")
+    fecha_asignada = Column(DateTime, nullable=False)
+    estado = Column(SqlEnum(EstadoTarea), default=EstadoTarea.pendiente, nullable=False)
+    tarea_recurrente = relationship("TareaRecurrente")
 
 Base.metadata.create_all(bind=db_engine)
 
