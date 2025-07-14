@@ -14,3 +14,7 @@ slowapi
 alembic
 python-dotenv
 psycopg2-binary
+python-jose
+python-jose[cryptography]
+bcrypt
+cryptography
