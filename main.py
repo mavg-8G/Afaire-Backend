@@ -197,10 +197,18 @@ class RepeatMode(str, Enum):
     biweekly = "biweekly"
     monthly = "monthly"
 
+
 # Association tables
 activity_user = Table(
     'activity_user', Base.metadata,
     Column('activity_id', ForeignKey('activities.id'), primary_key=True),
+    Column('user_id', ForeignKey('users.id'), primary_key=True)
+)
+
+# Nueva tabla secundaria para TareaAsignada y User
+tarea_asignada_user = Table(
+    'tarea_asignada_user', Base.metadata,
+    Column('tarea_asignada_id', ForeignKey('tareas_asignadas.id'), primary_key=True),
     Column('user_id', ForeignKey('users.id'), primary_key=True)
 )
 
@@ -316,7 +324,7 @@ class TareaAsignada(Base):
     __tablename__ = "tareas_asignadas"
     id = Column(Integer, primary_key=True)
     tarea_recurrente_id = Column(Integer, ForeignKey("tareas_recurrentes.id"), nullable=False)
-    responsibles = relationship("User", secondary=activity_user, backref="activities")
+    responsibles = relationship("User", secondary=tarea_asignada_user, backref="tareas_asignadas")
     fecha_asignada = Column(DateTime, nullable=False)
     estado = Column(SqlEnum(EstadoTarea), default=EstadoTarea.pendiente, nullable=False)
     tarea_recurrente = relationship("TareaRecurrente")
