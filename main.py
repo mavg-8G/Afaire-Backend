@@ -47,6 +47,8 @@ load_dotenv()
 
 APP_ENV = os.getenv("APP_ENV", "development")
 
+app.mount("/api", app)
+
 # Initialize slowapi Limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
