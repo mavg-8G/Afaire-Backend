@@ -14,6 +14,7 @@ import hashlib
 import subprocess
 import os
 import logging
+import traceback
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Text, Boolean, Enum as SqlEnum, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session, backref, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -890,7 +891,8 @@ async def github_webhook_front(request: Request):
         if not hmac.compare_digest(expected_sig, signature or ""):
             raise HTTPException(status_code=403, detail="Invalid signature")
 
-    try:   subprocess.check_call(["/bin/bash", "./deploy_front.sh"])
+    try:
+        subprocess.check_call(["/bin/bash", "./deploy_front.sh"])
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Deploy failed: {e}")
 
@@ -997,7 +999,6 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         )
         # Log to app_errors.log as well
         with open("app_errors.log", "a", encoding="utf-8") as logf:
-            import traceback
             logf.write(f"[{datetime.now().isoformat()}] [LOGIN ERROR] {str(e)}\n{traceback.format_exc()}\n")
         return SecureErrorResponse.internal_server_error("Authentication service temporarily unavailable")
 
